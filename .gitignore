@@ -1,0 +1,27 @@
+# Colcon build output (in case you build from inside this folder)
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Recordings and simulation output (share these separately, not in Git)
+*.db3
+*.mcap
+rosbag2_*/
+recordings/
+*.mp4
+*.mkv
+*.webm
+
+# Blender backups
+*.blend1
+*.blend2
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
