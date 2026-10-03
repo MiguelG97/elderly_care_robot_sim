@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>elderly_care_robot_sim</name>
+  <version>0.1.0</version>
+  <description>Simulation of a socially-aware assistive robot in a home environment for elderly care</description>
+  <maintainer email="GutierrezTorresMM@cardiff.ac.uk">Miguel Gutierrez Torres</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>bcr_bot</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
