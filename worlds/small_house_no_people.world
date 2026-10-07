@@ -27,41 +27,6 @@
       <elevation>0</elevation>
       <heading_deg>0</heading_deg>
     </spherical_coordinates>
-    <actor name='resident'>
-      <skin>
-        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
-      </skin>
-      <animation name='walk'>
-        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
-        <interpolate_x>true</interpolate_x>
-      </animation>
-      <script>
-        <loop>true</loop>
-        <auto_start>true</auto_start>
-        <trajectory id='0' type='walk'>
-          <waypoint>
-            <time>0</time>
-            <pose>-1.0600000000000001 4.4000000000000004 1 0 0 0</pose>
-          </waypoint>
-          <waypoint>
-            <time>4.29</time>
-            <pose>1.9399999999999999 4.4000000000000004 1 0 0 0</pose>
-          </waypoint>
-          <waypoint>
-            <time>5.79</time>
-            <pose>1.9399999999999999 4.4000000000000004 1 0 0 3.1400000000000001</pose>
-          </waypoint>
-          <waypoint>
-            <time>10.07</time>
-            <pose>-1.0600000000000001 4.4000000000000004 1 0 0 3.1400000000000001</pose>
-          </waypoint>
-          <waypoint>
-            <time>11.57</time>
-            <pose>-1.0600000000000001 4.4000000000000004 1 0 0 0</pose>
-          </waypoint>
-        </trajectory>
-      </script>
-    </actor>
     <model name='AirconditionerA_01_001'>
       <static>true</static>
       <include>
