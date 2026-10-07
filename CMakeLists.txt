@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 project(elderly_care_robot_sim)
 find_package(ament_cmake REQUIRED)
-install(DIRECTORY worlds models launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY worlds models launch config maps config maps DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/people_publisher.py DESTINATION lib/${PROJECT_NAME})
 ament_package()

@@ -6,6 +6,9 @@
   <maintainer email="GutierrezTorresMM@cardiff.ac.uk">Miguel Gutierrez Torres</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
