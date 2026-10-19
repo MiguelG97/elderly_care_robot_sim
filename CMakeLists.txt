@@ -7,6 +7,7 @@ install(PROGRAMS
   scripts/people_publisher.py
   scripts/social_zones.py
   scripts/send_goal.py
+  scripts/gz_description.py
   DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
