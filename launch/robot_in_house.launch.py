@@ -30,7 +30,7 @@ map frame, see scripts/gz_description.py), /mobile_base_controller/cmd_vel
 import os
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (AppendEnvironmentVariable, DeclareLaunchArgument,
+from launch.actions import (AppendEnvironmentVariable, DeclareLaunchArgument, ExecuteProcess,
                             IncludeLaunchDescription, SetEnvironmentVariable)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -40,6 +40,24 @@ from launch_ros.actions import Node
 
 def is_true(arg):
     return ["'", LaunchConfiguration(arg), "'.lower() in ('true', '1')"]
+
+
+# Tiago-Harmonic's spawner gives up on the base controller after about 10 s of wall
+# time. On a slow VM (real-time factor ~0.2) it is still starting then and stays
+# inactive, so the robot cannot drive. This retries until it is active.
+ACTIVATE_BASE = r'''
+for i in $(seq 60); do
+  state=$(ros2 control list_controllers 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' |
+          awk '$1 == "mobile_base_controller" {print $NF}')
+  case "$state" in
+    active) echo "mobile_base_controller is active"; exit 0 ;;
+    inactive) ros2 control set_controller_state mobile_base_controller active ;;
+  esac
+  sleep 5
+done
+echo "mobile_base_controller never became active" >&2
+exit 1
+'''
 
 
 def generate_launch_description():
@@ -104,6 +122,8 @@ def generate_launch_description():
         remappings=[('cmd_vel_in', '/cmd_vel_muxed'),
                     ('cmd_vel_out', '/mobile_base_controller/cmd_vel')])
 
+    activate_base = ExecuteProcess(cmd=['bash', '-c', ACTIVATE_BASE], output='screen')
+
     # Gazebo resolves the meshes' package:// URIs through these share folders.
     mesh_paths = [os.path.join(get_package_prefix(p), 'share')
                   for p in ('tiago_description', 'pmb2_description')]
@@ -127,4 +147,5 @@ def generate_launch_description():
         ground_truth_bridge,
         *camera_bridges,
         stamper,
+        activate_base,
     ])
