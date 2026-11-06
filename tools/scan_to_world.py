@@ -153,7 +153,7 @@ def footprint_box(pts):
     return best[1:]
 
 
-def write_obj(path, verts, groups, floor_z, mtl_name=None):
+def write_obj(path, verts, groups, floor_z, mtl_name=None, skip_floor_faces=False):
     used, out_v, lines = {}, [], []
     if mtl_name:
         lines.append(f'mtllib {mtl_name}')
@@ -163,6 +163,8 @@ def write_obj(path, verts, groups, floor_z, mtl_name=None):
         if mtl_name:
             lines.append(f'usemtl m{gi}')
         for t in g['tris']:
+            if skip_floor_faces and max(verts[i][2] for i in t) - floor_z < 0.02:
+                continue
             for i in t:
                 if i not in used:
                     used[i] = len(out_v) + 1
@@ -366,7 +368,10 @@ def main():
     write_obj(os.path.join(out, 'meshes', 'visual.obj'), verts,
               [g for g in groups if g['kind'] != 'door'], floor_z, mtl_name='visual.mtl')
     write_obj(os.path.join(out, 'meshes', 'walls.obj'), verts,
-              [g for g in groups if g['kind'] == 'wall'], floor_z)
+              [g for g in groups if g['kind'] == 'wall'], floor_z,
+              # The walls' undersides run across the doorways at floor level, and the
+              # wheels caught on their edges: TIAGo could not drive through a doorway.
+              skip_floor_faces=True)
 
     boxes = ''
     for i, g in enumerate(g for g in groups if g['kind'] == 'furniture'):
