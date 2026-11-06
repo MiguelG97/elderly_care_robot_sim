@@ -9,15 +9,12 @@ Writes homes/<name>/ (git-ignored, the homes are private):
   meshes/visual.obj + .mtl     everything except the door panels, so doorways are open
   meshes/walls.obj             walls only, used as the collision mesh
   <name>.world                 the world to launch
+  map.pgm, map.yaml            Nav2 map in Gazebo world coordinates, for navigation.launch.py
   preview.png                  top view: obstacles (black), doorways (blue), floor the robot's
                                centre can reach (green), other floor inside (white), outside
                                (grey), spawn point (red)
 
-Then, after colcon build:
-  ros2 launch elderly_care_robot_sim robot_in_house.launch.py \
-    world:=../homes/<name>/<name>.world x:=<x> y:=<y> yaw:=0
-
-The script prints the spawn x and y. It needs only the Python standard library.
+Then, after colcon build, the script's printed commands start the home and Nav2 in it. It needs only the Python standard library.
 
 What the scan looks like (Room mode, RoomPlan underneath): metres, Y-up, centred on the
 origin, one material per element. Walls, doors and windows are a few flat quads; doors
@@ -37,6 +34,9 @@ GRID = 0.05            # m per preview cell, same as the Nav2 maps
 ROBOT_RADIUS = 0.275   # TIAGo PMB2, from tiago_2dnav (same as nav2_params.yaml)
 ROBOT_HEIGHT = 1.2     # anything lower than this can hit TIAGo's base, torso or head
 PREVIEW_SCALE = 4
+# Height band drawn into the Nav2 map: the base laser's plane is low in the PMB2 base, so
+# AMCL must match what it sees there (table legs, not table tops).
+MAP_BAND = (0.05, 0.40)
 FLOOR_FURNITURE = 0.3  # furniture starting higher than this sits on something else or hangs on a wall
 
 
@@ -187,7 +187,8 @@ def write_obj(path, verts, groups, floor_z, mtl_name=None, skip_floor_faces=Fals
                 f.write(f'newmtl m{gi}\nKa {r:.3f} {gr:.3f} {b:.3f}\nKd {r:.3f} {gr:.3f} {b:.3f}\nKs 0 0 0\nd 1\nillum 1\n')
 
 
-def occupancy(verts, groups, floor_z, x0, y0, nx, ny, kinds=('wall', 'furniture', 'raised')):
+def occupancy(verts, groups, floor_z, x0, y0, nx, ny, kinds=('wall', 'furniture', 'raised'),
+              band=(0.02, ROBOT_HEIGHT)):
     """Cells holding a surface of the given kinds between the floor and robot height."""
     occ = bytearray(nx * ny)
     step = GRID / 2
@@ -201,7 +202,7 @@ def occupancy(verts, groups, floor_z, x0, y0, nx, ny, kinds=('wall', 'furniture'
                 for j in range(n + 1 - i):
                     u, v = i / n, j / n
                     z = a[2] + u * (b[2] - a[2]) + v * (c[2] - a[2]) - floor_z
-                    if not 0.02 < z < ROBOT_HEIGHT:
+                    if not band[0] < z < band[1]:
                         continue
                     x = a[0] + u * (b[0] - a[0]) + v * (c[0] - a[0])
                     y = a[1] + u * (b[1] - a[1]) + v * (c[1] - a[1])
@@ -226,6 +227,21 @@ def clearance(occ, nx, ny):
                     if 0 <= xx < nx and 0 <= yy < ny and d[yy * nx + xx] + w < d[k]:
                         d[k] = d[yy * nx + xx] + w
     return [v * GRID / 3 for v in d]
+
+
+def close_gaps(occ, nx, ny):
+    """Fill one-cell gaps, such as the inside of a wall drawn as its two faces."""
+    def grow(src, value):
+        out = bytearray(src)
+        for k in range(nx * ny):
+            if src[k] == value:
+                x, y = k % nx, k // nx
+                for xx in (x - 1, x, x + 1):
+                    for yy in (y - 1, y, y + 1):
+                        if 0 <= xx < nx and 0 <= yy < ny:
+                            out[yy * nx + xx] = value
+        return out
+    return grow(grow(occ, 1), 0)
 
 
 def flood(ok, starts, nx):
@@ -373,9 +389,10 @@ def main():
               # wheels caught on their edges: TIAGo could not drive through a doorway.
               skip_floor_faces=True)
 
-    boxes = ''
+    boxes, footprints = '', []
     for i, g in enumerate(g for g in groups if g['kind'] == 'furniture'):
         x, y, length, width, yaw = footprint_box([verts[k][:2] for t in g['tris'] for k in t])
+        footprints.append((x, y, length, width, yaw))
         boxes += BOX.format(i=i, x=x, y=y, z=(g['lo'][2] + g['hi'][2]) / 2 - floor_z,
                             sx=length, sy=width, sz=g['size'][2], yaw=yaw)
     lo, hi = slab['lo'], slab['hi']
@@ -432,15 +449,37 @@ def main():
         rows += [[c for px in zip(row[0::3], row[1::3], row[2::3]) for c in px * PREVIEW_SCALE]] * PREVIEW_SCALE
     write_png(os.path.join(out, 'preview.png'), rows)
 
+    walls = close_gaps(occupancy(verts, groups, floor_z, x0, y0, nx, ny, band=MAP_BAND), nx, ny)
+    # Furniture is drawn as its collision box, which is what the robot bumps into; the
+    # laser only sees legs inside it, and points inside an obstacle still suit AMCL.
+    for fx, fy, length, width, yaw in footprints:
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        for k in range(nx * ny):
+            px, py = x0 + (k % nx + 0.5) * GRID - fx, y0 + (k // nx + 0.5) * GRID - fy
+            if abs(px * c + py * s_) <= length / 2 and abs(-px * s_ + py * c) <= width / 2:
+                walls[k] = 1
+    with open(os.path.join(out, 'map.pgm'), 'wb') as f:
+        f.write(f'P5\n{nx} {ny}\n255\n'.encode())
+        for y in range(ny - 1, -1, -1):
+            f.write(bytes(0 if walls[y * nx + x] else 205 if outside[y * nx + x] else 254
+                          for x in range(nx)))
+    with open(os.path.join(out, 'map.yaml'), 'w') as f:
+        f.write(f'image: map.pgm\nmode: trinary\nresolution: {GRID}\norigin: [{x0:.3f}, {y0:.3f}, 0]\n'
+                'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
+
     print(f'Wrote {out}')
     print('Elements: ' + ', '.join(f'{v} {k}' for k, v in sorted(kinds.items())))
     print(f'Doors removed: {kinds.get("door", 0)}; furniture collision boxes: {kinds.get("furniture", 0)}')
     print(f'Free floor inside: {free * GRID * GRID:.1f} m2. TIAGo (radius {ROBOT_RADIUS} m) can cover '
           f'{100 * covered / max(free, 1):.0f}% of it; its centre can reach {100 * len(region) / max(free, 1):.0f}%.')
     print(f'Spawn (most open spot): x={sx:.2f} y={sy:.2f}, clearance {clear[spawn]:.2f} m')
+    pose = f'x:={sx:.2f} y:={sy:.2f} yaw:=0'
     print('Launch with:')
     print(f'  ros2 launch elderly_care_robot_sim robot_in_house.launch.py '
-          f'world:=../homes/{args.name}/{args.name}.world x:={sx:.2f} y:={sy:.2f} yaw:=0')
+          f'world:=../homes/{args.name}/{args.name}.world {pose}')
+    print('Then Nav2 in a second terminal:')
+    print(f'  ros2 launch elderly_care_robot_sim navigation.launch.py world:=../homes/{args.name}/{args.name}.world '
+          f'map:=$(ros2 pkg prefix elderly_care_robot_sim)/share/elderly_care_robot_sim/homes/{args.name}/map.yaml {pose}')
 
 
 if __name__ == '__main__':

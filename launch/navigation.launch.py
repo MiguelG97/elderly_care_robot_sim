@@ -10,6 +10,10 @@ Then, in a second terminal, one of:
 Both modes run people_publisher and social_zones, so RViz shows the same people
 markers and zones; only social:=true feeds the zones into Nav2's costmaps.
 
+A scanned home (tools/scan_to_world.py) passes its own world, map and spawn pose; the
+converter prints the command. Its people_publisher stops with "No scripted actors" until
+the home has a resident.
+
 Localisation: the map is in Gazebo world coordinates. TIAGo's odometry comes from
 its wheels and starts at its spawn pose, so AMCL localises it on the map, starting
 from the spawn pose given by x, y, yaw (same defaults as robot_in_house.launch.py).
@@ -82,7 +86,7 @@ def launch_setup(context):
         package='elderly_care_robot_sim', executable='people_publisher.py', name='people_publisher',
         output='screen',
         parameters=[sim_time, {
-            'world_file': os.path.join(pkg, 'worlds', 'small_house.world'),
+            'world_file': os.path.join(pkg, 'worlds', arg('world')),
             'actor_names': ['resident'],
             'map_frame': 'map'}])
 
@@ -106,6 +110,7 @@ def generate_launch_description():
         DeclareLaunchArgument('social', default_value='false',
                               description='true = human-aware (zones in costmaps), false = baseline'),
         DeclareLaunchArgument('map', default_value=os.path.join(pkg, 'maps', 'small_house.yaml')),
+        DeclareLaunchArgument('world', default_value='small_house.world'),
         DeclareLaunchArgument('rviz', default_value='true'),
         # AMCL's initial pose: the spawn pose in Gazebo world coordinates
         DeclareLaunchArgument('x', default_value='2.94'),
