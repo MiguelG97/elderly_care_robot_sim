@@ -10,7 +10,8 @@ or drive by hand (key_vel has priority over Nav2 in TIAGo's twist_mux):
   ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=key_vel
 
 Arguments:
-  world      world file name inside the package's worlds/ folder (default small_house.world)
+  world      world file name inside the package's worlds/ folder (default small_house.world);
+             a home converted with tools/scan_to_world.py is ../homes/<name>/<name>.world
   x, y, yaw  spawn pose in Gazebo world coordinates (default: east end of the
              corridor, facing west, toward the walking resident)
   camera     enable the head RGB-D camera (default False: saves a lot of CPU on a
@@ -138,6 +139,7 @@ def generate_launch_description():
         SetEnvironmentVariable('GZ_SIM_SERVER_CONFIG_PATH',
                                os.path.join(pkg, 'config', 'gz_server.config')),
         AppendEnvironmentVariable('GZ_SIM_RESOURCE_PATH', os.path.join(pkg, 'models')),
+        AppendEnvironmentVariable('GZ_SIM_RESOURCE_PATH', os.path.join(pkg, 'homes')),
         *[AppendEnvironmentVariable('GZ_SIM_RESOURCE_PATH', p) for p in mesh_paths],
         house,
         bringup,
