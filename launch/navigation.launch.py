@@ -11,8 +11,7 @@ Both modes run people_publisher and social_zones, so RViz shows the same people
 markers and zones; only social:=true feeds the zones into Nav2's costmaps.
 
 A scanned home (tools/scan_to_world.py) passes its own world, map and spawn pose; the
-converter prints the command. Its people_publisher stops with "No scripted actors" until
-the home has a resident.
+converter prints the command. Its world has the resident from tools/resident_routine.py.
 
 Localisation: the map is in Gazebo world coordinates. TIAGo's odometry comes from
 its wheels and starts at its spawn pose, so AMCL localises it on the map, starting

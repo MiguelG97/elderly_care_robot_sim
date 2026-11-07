@@ -26,3 +26,12 @@ the rooms they join, passages narrower than 1.2 m, a suggested dock pose, reside
 doorways blue, narrow passages orange, dock red, resident spots purple. The converter
 prints which colour is which room. Only the CSV's per-room area and dimension rows are
 read, never its name row, which can hold the address.
+
+The converter also gives each home a resident (`tools/resident_routine.py`): a looped,
+compressed day walking bedroom → bathroom → day rooms and back at 0.65 m/s, pausing 30 s
+at each stop, written into the home's world as `<actor name='resident'>` and drawn in
+`routine.png`. To change the pace or the pauses without reconverting:
+
+```bash
+python3 tools/resident_routine.py homes/guest_flat --speed 0.6 --dwell 45
+```
