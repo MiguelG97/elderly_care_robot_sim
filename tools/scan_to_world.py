@@ -382,7 +382,8 @@ def room_shapes(regions, barrier, nx):
 
 
 def name_rooms(shapes, plan):
-    """Match the scan's rooms to the floor plan's by area and size; unmatched ones get 'Room n'."""
+    """Match the scan's rooms to the floor plan's by area and size. Spaces the floor plan does
+    not have (usually a notch outside the walls that looks enclosed) become 'Unlabelled n'."""
     names = list(plan)
 
     def cost(i, name):
@@ -413,7 +414,7 @@ def name_rooms(shapes, plan):
     for i in range(len(shapes)):
         if i not in best:
             n += 1
-        out.append(best.get(i, f'Room {n}'))
+        out.append(best.get(i, f'Unlabelled {n}'))
     return out
 
 
@@ -488,7 +489,7 @@ def annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny, pla
     # Dock: next to a wall (robot centre 0.33-0.45 m from it) with open floor in front, in a
     # room the resident uses, at least 1 m from a doorway; facing into the room. A suggestion
     # to check on the image.
-    service = ('bath', 'closet', 'wc', 'toilet', 'storage', 'cupboard', 'utility')
+    service = ('bath', 'closet', 'wc', 'toilet', 'storage', 'cupboard', 'utility', 'unlabelled')
     dock = None
     for k in reach:
         if not 0.33 <= clear[k] <= 0.45:
