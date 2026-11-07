@@ -2,7 +2,8 @@
 """
 Turn a Polycam Room-mode scan (OBJ export, zipped or not) into a Gazebo model and world.
 
-  python3 tools/scan_to_world.py "Scans/Guest_Flat/Flat/OBJ/Main Guest Flat.zip" guest_flat
+  python3 tools/scan_to_world.py "Scans/Guest_Flat/Flat/OBJ/Main Guest Flat.zip" guest_flat \
+    --floorplan "Scans/Guest_Flat/Flat/Floorplan/Main Guest Flat.csv"
 
 Writes homes/<name>/ (git-ignored, the homes are private):
   model.sdf, model.config      static model of the home
@@ -10,6 +11,10 @@ Writes homes/<name>/ (git-ignored, the homes are private):
   meshes/walls.obj             walls only, used as the collision mesh
   <name>.world                 the world to launch
   map.pgm, map.yaml            Nav2 map in Gazebo world coordinates, for navigation.launch.py
+  annotations.yaml, rooms.pgm  rooms (named from the floor-plan CSV given with --floorplan),
+                               doorways, narrow passages, a suggested dock pose and resident
+                               spots; rooms.pgm holds each cell's room id on the map's grid
+  annotations.png              the same, to check by eye
   preview.png                  top view: obstacles (black), doorways (blue), floor the robot's
                                centre can reach (green), other floor inside (white), outside
                                (grey), spawn point (red)
@@ -22,6 +27,8 @@ and windows are single two-triangle panels; furniture is a detailed mesh; the fl
 10 cm slab. Element types are not named, so they are told apart by shape.
 """
 import argparse
+import csv
+import itertools
 import math
 import os
 import struct
@@ -37,6 +44,8 @@ PREVIEW_SCALE = 4
 # Height band drawn into the Nav2 map: the base laser's plane is low in the PMB2 base, so
 # AMCL must match what it sees there (table legs, not table tops).
 MAP_BAND = (0.05, 0.40)
+NARROW = 1.2          # passages narrower than this are where a robot and a person cannot pass
+                      # each other (Hall's personal-distance limit)
 FLOOR_FURNITURE = 0.3  # furniture starting higher than this sits on something else or hangs on a wall
 
 
@@ -47,10 +56,11 @@ def read_scan(path):
             names = z.namelist()
             obj = next(n for n in names if n.lower().endswith('.obj'))
             mtl = next((n for n in names if n.lower().endswith('.mtl')), None)
-            return z.read(obj).decode(), z.read(mtl).decode() if mtl else ''
+            return (z.read(obj).decode(errors='replace'),
+                    z.read(mtl).decode(errors='replace') if mtl else '')
     mtl_path = os.path.splitext(path)[0] + '.mtl'
-    mtl = open(mtl_path).read() if os.path.exists(mtl_path) else ''
-    return open(path).read(), mtl
+    mtl = open(mtl_path, errors='replace').read() if os.path.exists(mtl_path) else ''
+    return open(path, errors='replace').read(), mtl
 
 
 def parse(obj_text, mtl_text):
@@ -229,8 +239,8 @@ def clearance(occ, nx, ny):
     return [v * GRID / 3 for v in d]
 
 
-def close_gaps(occ, nx, ny):
-    """Fill one-cell gaps, such as the inside of a wall drawn as its two faces."""
+def close_gaps(occ, nx, ny, cells=1):
+    """Fill gaps up to 2 * cells wide, such as the inside of a wall drawn as its two faces."""
     def grow(src, value):
         out = bytearray(src)
         for k in range(nx * ny):
@@ -241,7 +251,11 @@ def close_gaps(occ, nx, ny):
                         if 0 <= xx < nx and 0 <= yy < ny:
                             out[yy * nx + xx] = value
         return out
-    return grow(grow(occ, 1), 0)
+    for _ in range(cells):
+        occ = grow(occ, 1)
+    for _ in range(cells):
+        occ = grow(occ, 0)
+    return occ
 
 
 def flood(ok, starts, nx):
@@ -290,6 +304,299 @@ def write_png(path, rgb_rows):
     with open(path, 'wb') as f:
         f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
                 + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+
+
+def read_floorplan(path):
+    """Room name -> {'area', 'dims'} from a RoomPlan floor-plan CSV. Only the per-room area
+    and dimension rows are read: the file's 'Name' row can hold the home's address."""
+    rooms = {}
+    with open(path, encoding='utf-8-sig') as f:
+        for row in csv.reader(f):
+            if len(row) < 3 or row[0] in ('Room', 'Entire Roomplan'):
+                continue
+            room, quantity, value = row[0], row[1], row[2]
+            if quantity == 'Floor area [m^2]':
+                rooms.setdefault(room, {})['area'] = float(value)
+            elif quantity in ('Dimensions [m]', 'Inscribed dimensions [m]'):
+                try:
+                    rooms.setdefault(room, {})['dims'] = sorted(float(v) for v in value.lower().split('x'))
+                except ValueError:
+                    pass
+    return {name: r for name, r in rooms.items() if 'area' in r}
+
+
+def enclosed(barrier, nx, ny, need=6):
+    """Cells with a wall somewhere in at least `need` of the 8 compass directions. Unlike a
+    flood from the edge, this keeps a room whose scan is missing a stretch of wall."""
+    n = nx * ny
+    hits = [0] * n
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+        seen = bytearray(n)
+        xs = range(nx - 1, -1, -1) if dx > 0 else range(nx)
+        ys = range(ny - 1, -1, -1) if dy > 0 else range(ny)
+        for y in ys:
+            for x in xs:
+                k = y * nx + x
+                xx, yy = x + dx, y + dy
+                ahead = 0 <= xx < nx and 0 <= yy < ny and seen[yy * nx + xx]
+                if ahead:
+                    hits[k] += 1
+                seen[k] = barrier[k] or ahead
+    return [h >= need for h in hits]
+
+
+def components(ok, nx, ny, diagonal=False):
+    steps = [(1, 0), (-1, 0), (0, 1), (0, -1)] + ([(1, 1), (1, -1), (-1, 1), (-1, -1)] if diagonal else [])
+    label, regions = [0] * (nx * ny), []
+    for start in range(nx * ny):
+        if not ok[start] or label[start]:
+            continue
+        regions.append([start])
+        label[start] = len(regions)
+        q = deque([start])
+        while q:
+            k = q.popleft()
+            x, y = k % nx, k // nx
+            for dx, dy in steps:
+                xx, yy = x + dx, y + dy
+                kk = yy * nx + xx
+                if 0 <= xx < nx and 0 <= yy < ny and ok[kk] and not label[kk]:
+                    label[kk] = len(regions)
+                    regions[-1].append(kk)
+                    q.append(kk)
+    return label, regions
+
+
+def room_shapes(regions, barrier, nx):
+    """(floor area, sorted bounding-box sides) per room. The wall cells along a room's edge
+    are only partly wall, so half of each counts as floor (RoomPlan measures to the wall)."""
+    shapes = []
+    for cells in regions:
+        inside = set(cells)
+        edge = {n for k in cells for n in (k - 1, k + 1, k - nx, k + nx)
+                if n not in inside and 0 <= n < len(barrier) and barrier[n]}
+        xs, ys = [k % nx for k in cells], [k // nx for k in cells]
+        shapes.append(((len(cells) + 0.5 * len(edge)) * GRID * GRID,
+                       sorted(((max(xs) - min(xs) + 2) * GRID, (max(ys) - min(ys) + 2) * GRID))))
+    return shapes
+
+
+def name_rooms(shapes, plan):
+    """Match the scan's rooms to the floor plan's by area and size; unmatched ones get 'Room n'."""
+    names = list(plan)
+
+    def cost(i, name):
+        area, dims = shapes[i]
+        c = abs(math.log(area / plan[name]['area']))
+        if 'dims' in plan[name]:
+            c += sum(abs(a - b) for a, b in zip(dims, plan[name]['dims'])) / sum(plan[name]['dims'])
+        return c
+
+    best = {}
+    small, large = (names, list(range(len(shapes)))) if len(names) <= len(shapes) else (list(range(len(shapes))), names)
+    if math.perm(len(large), len(small)) <= 200000:
+        top = None
+        for pick in itertools.permutations(large, len(small)):
+            pairs = list(zip(small, pick))
+            total = sum(cost(*((b, a) if isinstance(a, str) else (a, b))) for a, b in pairs)
+            if top is None or total < top[0]:
+                top = (total, pairs)
+        for a, b in top[1]:
+            i, name = (b, a) if isinstance(a, str) else (a, b)
+            best[i] = name
+    else:
+        for c, i, name in sorted((cost(i, n), i, n) for i in range(len(shapes)) for n in names):
+            if i not in best and name not in best.values():
+                best[i] = name
+    n = 0
+    out = []
+    for i in range(len(shapes)):
+        if i not in best:
+            n += 1
+        out.append(best.get(i, f'Room {n}'))
+    return out
+
+
+def annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny, plan):
+    def centre(k):
+        return x0 + (k % nx + 0.5) * GRID, y0 + (k // nx + 0.5) * GRID
+
+    def cell(x, y):
+        cx, cy = int((x - x0) / GRID), int((y - y0) / GRID)
+        return cy * nx + cx if 0 <= cx < nx and 0 <= cy < ny else None
+
+    # Rooms: floor split by walls (full height) and shut doors; furniture does not split rooms.
+    # Closing 0.3 m gaps seals corners the scan left open (a closet leaked outside through
+    # one) without closing doorways, which are at least 0.6 m.
+    walls = close_gaps(occupancy(verts, groups, floor_z, x0, y0, nx, ny, kinds=('wall',), band=(0.02, 10.0)),
+                       nx, ny, cells=3)
+    doors = occupancy(verts, groups, floor_z, x0, y0, nx, ny, kinds=('door',), band=(0.02, 10.0))
+    barrier = [w or d for w, d in zip(walls, doors)]
+    inside_walls = enclosed(barrier, nx, ny)
+    label, regions = components([not b and i for b, i in zip(barrier, inside_walls)], nx, ny)
+    keep = [r for r in regions if len(r) * GRID * GRID >= 0.3]      # drop slivers between wall faces
+    label = [0] * (nx * ny)
+    for i, r in enumerate(keep):
+        for k in r:
+            label[k] = i + 1
+    shapes = room_shapes(keep, barrier, nx)
+    names = name_rooms(shapes, plan) if plan else [f'Room {i + 1}' for i in range(len(keep))]
+
+    def room_at(x, y, search=0.3):
+        k = cell(x, y)
+        if k is not None and label[k]:
+            return names[label[k] - 1]
+        best = None
+        for j in range(nx * ny):
+            if label[j]:
+                cx, cy = centre(j)
+                d = math.hypot(cx - x, cy - y)
+                if d <= search and (best is None or d < best[0]):
+                    best = (d, names[label[j] - 1])
+        return best[1] if best else 'outside'
+
+    door_list = []
+    for g in (g for g in groups if g['kind'] == 'door'):
+        cx, cy = (g['lo'][0] + g['hi'][0]) / 2, (g['lo'][1] + g['hi'][1]) / 2
+        along_x = g['size'][0] >= g['size'][1]
+        nxv, nyv = (0.0, 1.0) if along_x else (1.0, 0.0)
+        door_list.append({'x': cx, 'y': cy, 'width': max(g['size'][0], g['size'][1]),
+                          'yaw': 0.0 if along_x else math.pi / 2,
+                          'between': sorted({room_at(cx + 0.25 * nxv, cy + 0.25 * nyv),
+                                             room_at(cx - 0.25 * nxv, cy - 0.25 * nyv)})})
+
+    # Narrow passages: the middle line of free space (local maximum of clearance across it)
+    # where the space is narrower than NARROW but the robot still fits.
+    def ridge(k):
+        x, y = k % nx, k // nx
+        def peak(a, b):   # not lower than either side, and higher than one: excludes runs along a wall
+            return clear[k] >= a and clear[k] >= b and clear[k] > min(a, b)
+        across_x = 0 < x < nx - 1 and peak(clear[k - 1], clear[k + 1])
+        across_y = 0 < y < ny - 1 and peak(clear[k - nx], clear[k + nx])
+        return across_x or across_y
+    narrow_ok = [k in reach and clear[k] < NARROW / 2 and ridge(k) for k in range(nx * ny)]
+    _, passages = components(narrow_ok, nx, ny, diagonal=True)
+    passage_list = []
+    for cells in (c for c in passages if len(c) * GRID >= 0.5):
+        # median, not minimum: a passage's ends taper to the robot's own width
+        k = sorted(cells, key=lambda k: clear[k])[len(cells) // 2]
+        px = sum(centre(c)[0] for c in cells) / len(cells)
+        py = sum(centre(c)[1] for c in cells) / len(cells)
+        passage_list.append({'x': px, 'y': py, 'width': 2 * clear[k], 'length': len(cells) * GRID,
+                             'room': room_at(px, py), 'cells': cells})
+
+    # Dock: next to a wall (robot centre 0.33-0.45 m from it) with open floor in front, in a
+    # room the resident uses, at least 1 m from a doorway; facing into the room. A suggestion
+    # to check on the image.
+    service = ('bath', 'closet', 'wc', 'toilet', 'storage', 'cupboard', 'utility')
+    dock = None
+    for k in reach:
+        if not 0.33 <= clear[k] <= 0.45:
+            continue
+        x, y = k % nx, k // nx
+        if not (0 < x < nx - 1 and 0 < y < ny - 1):
+            continue
+        gx, gy = clear[k + 1] - clear[k - 1], clear[k + nx] - clear[k - nx]
+        n = math.hypot(gx, gy)
+        if not n:
+            continue
+        cx, cy = centre(k)
+        front = cell(cx + 0.8 * gx / n, cy + 0.8 * gy / n)
+        room = names[label[k] - 1] if label[k] else ''
+        if front is None or front not in reach or any(w in room.lower() for w in service):
+            continue
+        if any(math.hypot(cx - d['x'], cy - d['y']) < 1.0 for d in door_list):
+            continue    # a parked robot would block the doorway
+        if dock is None or clear[front] > dock[0]:
+            dock = (clear[front], k, math.atan2(gy, gx), room)
+
+    spots = []
+    for i, r in enumerate(keep):
+        if any(w in names[i].lower() for w in service):
+            continue
+        k = max(r, key=lambda k: clear[k])
+        spots.append({'room': names[i], 'x': centre(k)[0], 'y': centre(k)[1]})
+
+    with open(os.path.join(out, 'rooms.pgm'), 'wb') as f:
+        f.write(f'P5\n{nx} {ny}\n255\n'.encode())
+        for y in range(ny - 1, -1, -1):
+            f.write(bytes(label[y * nx + x] for x in range(nx)))
+
+    lines = ['# Generated by tools/scan_to_world.py. Coordinates in metres, Gazebo world = map frame.',
+             '# rooms.pgm: each cell holds its room id (0 = no room), on the map grid below.',
+             f'grid: {{resolution: {GRID}, origin: [{x0:.3f}, {y0:.3f}], width: {nx}, height: {ny}}}',
+             'rooms:']
+    for i, (name, (area, _)) in enumerate(zip(names, shapes)):
+        plan_area = plan.get(name, {}).get('area') if plan else None
+        cx = sum(centre(k)[0] for k in keep[i]) / len(keep[i])
+        cy = sum(centre(k)[1] for k in keep[i]) / len(keep[i])
+        lines.append(f'  - {{id: {i + 1}, name: "{name}", area_m2: {area:.2f}, '
+                     f'floorplan_area_m2: {plan_area if plan_area is not None else "null"}, '
+                     f'centre: [{cx:.2f}, {cy:.2f}]}}')
+    lines.append('doors:')
+    for d in door_list:
+        lines.append(f'  - {{x: {d["x"]:.2f}, y: {d["y"]:.2f}, yaw: {d["yaw"]:.4f}, width: {d["width"]:.2f}, '
+                     f'between: [{", ".join(chr(34) + b + chr(34) for b in d["between"])}]}}')
+    lines.append(f'narrow_passages:  # free space narrower than {NARROW} m where the robot still fits')
+    for p in passage_list:
+        lines.append(f'  - {{x: {p["x"]:.2f}, y: {p["y"]:.2f}, width: {p["width"]:.2f}, '
+                     f'length: {p["length"]:.2f}, room: "{p["room"]}"}}')
+    if dock:
+        dx, dy = centre(dock[1])
+        lines.append(f'dock: {{x: {dx:.2f}, y: {dy:.2f}, yaw: {dock[2]:.4f}, room: "{dock[3]}", '
+                     'suggested: true}  # check on annotations.png')
+    else:
+        lines.append('dock: null  # no spot next to a wall with open floor in front: set by hand')
+    lines.append('resident_spots:  # most open floor in each room the resident uses')
+    for sp in spots:
+        lines.append(f'  - {{room: "{sp["room"]}", x: {sp["x"]:.2f}, y: {sp["y"]:.2f}}}')
+    with open(os.path.join(out, 'annotations.yaml'), 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+    palette = [(141, 211, 199), (255, 255, 179), (190, 186, 218), (251, 128, 114), (128, 177, 211),
+               (253, 180, 98), (179, 222, 105), (252, 205, 229), (204, 235, 197), (255, 237, 111)]
+    narrow_cells = {k for p in passage_list for k in p['cells']}
+    marks = {}
+    if dock:
+        marks.update({j: (220, 30, 30) for j in range(nx * ny)
+                      if abs(j % nx - dock[1] % nx) <= 2 and abs(j // nx - dock[1] // nx) <= 2})
+    for sp in spots:
+        c = cell(sp['x'], sp['y'])
+        marks.update({j: (120, 40, 160) for j in range(nx * ny)
+                      if abs(j % nx - c % nx) <= 1 and abs(j // nx - c // nx) <= 1})
+    rows = []
+    for y in range(ny - 1, -1, -1):
+        row = []
+        for x in range(nx):
+            k = y * nx + x
+            if k in marks:
+                row += marks[k]
+            elif doors[k]:
+                row += (40, 90, 220)
+            elif occ[k] or walls[k]:
+                row += (30, 30, 30)
+            elif k in narrow_cells:
+                row += (230, 120, 20)
+            elif label[k]:
+                row += palette[(label[k] - 1) % len(palette)]
+            else:
+                row += (200, 200, 200)
+        rows += [[c for px in zip(row[0::3], row[1::3], row[2::3]) for c in px * PREVIEW_SCALE]] * PREVIEW_SCALE
+    write_png(os.path.join(out, 'annotations.png'), rows)
+
+    print('Rooms (scan area vs floor plan, colour on annotations.png):')
+    colour_names = ['teal', 'pale yellow', 'lilac', 'salmon', 'blue', 'orange', 'green', 'pink', 'mint', 'yellow']
+    for i, (name, (area, _)) in enumerate(zip(names, shapes)):
+        plan_area = plan.get(name, {}).get('area') if plan else None
+        diff = f', floor plan {plan_area:.1f} m2 ({100 * (area - plan_area) / plan_area:+.0f}%)' if plan_area else ''
+        print(f'  {name}: {area:.1f} m2{diff} [{colour_names[i % len(colour_names)]}]')
+    if plan:
+        missing = [n for n in plan if n not in names]
+        if missing:
+            print('  In the floor plan but not found in the scan: ' + ', '.join(missing))
+    print(f'Doors: {len(door_list)}; narrow passages (< {NARROW} m): {len(passage_list)}')
+    print('Dock (suggested, red on the image): ' +
+          (f'x={centre(dock[1])[0]:.2f} y={centre(dock[1])[1]:.2f} in {dock[3]}' if dock else 'none found'))
 
 
 MODEL_SDF = """<?xml version="1.0"?>
@@ -369,6 +676,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('scan', help='Room-mode OBJ export (.obj or the .zip Polycam gives)')
     ap.add_argument('name', help='home name, e.g. guest_flat (lowercase, no spaces)')
+    ap.add_argument('--floorplan', help="the home's RoomPlan floor-plan CSV, to name the rooms")
     ap.add_argument('--out', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'homes'))
     args = ap.parse_args()
 
@@ -466,6 +774,9 @@ def main():
     with open(os.path.join(out, 'map.yaml'), 'w') as f:
         f.write(f'image: map.pgm\nmode: trinary\nresolution: {GRID}\norigin: [{x0:.3f}, {y0:.3f}, 0]\n'
                 'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
+
+    annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny,
+             read_floorplan(args.floorplan) if args.floorplan else {})
 
     print(f'Wrote {out}')
     print('Elements: ' + ', '.join(f'{v} {k}' for k, v in sorted(kinds.items())))
