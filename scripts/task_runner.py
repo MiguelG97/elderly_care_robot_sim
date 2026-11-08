@@ -11,7 +11,7 @@ Start the home with the robot on its dock (the converter prints the dock pose) a
     x:=-2.35 y:=0.59 yaw:=0.00
 Then one of:
   ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true -p home:=guest_flat \
-    -p task:=patrol -p returns:=5 -p seed:=1
+    -p task:=patrol -p returns:=5 -p seed:=1 -p social:=false
   ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true -p home:=guest_flat \
     -p task:=room -p room:=Bathroom
   ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true -p home:=guest_flat \
@@ -26,9 +26,12 @@ Tasks (goals come from the home's annotations.yaml, written by tools/scan_to_wor
 
 Return to dock: with returns > 0, a "go back to the dock" call comes at random sim times,
 gap_min to gap_max seconds apart (drawn from seed). The robot drops its job, gets
-dock_timeout seconds to reach the dock, stays rest seconds, then carries on. The run ends
+dock_timeout seconds to reach the dock (if Nav2 gives up, the goal is sent again until the
+time is up), stays rest seconds, then carries on. The run ends
 after that many returns, or after duration sim seconds if set (0 = no limit). With
 returns = 0, room and resident do their job once and exit.
+
+social is only written to the log: pass the same value as navigation.launch.py's social:=.
 
 Docked = Nav2 succeeded AND the true pose (/ground_truth/odom, not AMCL) is within
 dock_xy_tol and dock_yaw_tol of the dock pose. The defaults equal Nav2's goal checker,
@@ -63,7 +66,7 @@ from std_msgs.msg import String
 
 FIELDS = ['run_id', 'home', 'social', 'seed', 'n', 'kind', 'target', 'goal_x', 'goal_y', 'goal_yaw',
           't_start', 't_end', 'duration_s', 'result', 'reason', 'nav2_status', 'nav2_error',
-          'path_m', 'end_x', 'end_y', 'err_xy_m', 'err_yaw_rad',
+          'attempts', 'path_m', 'end_x', 'end_y', 'err_xy_m', 'err_yaw_rad',
           'robot_x', 'robot_y', 'robot_room', 'resident_x', 'resident_y', 'resident_room',
           'resident_doorway', 'resident_dist_m']
 STATUS = {GoalStatus.STATUS_SUCCEEDED: 'succeeded', GoalStatus.STATUS_CANCELED: 'canceled',
@@ -217,39 +220,50 @@ class TaskRunner(Node):
         handle = future.result()
         return handle if handle and handle.accepted else None
 
-    def cancel(self, handle):
+    def cancel(self, handle, result):
         future = handle.cancel_goal_async()
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        # A goal sent while Nav2 is still winding down the cancelled one is aborted at once
+        # , so wait until the old goal has ended.
+        rclpy.spin_until_future_complete(self, result, timeout_sec=10.0)
 
-    def navigate(self, x, y, yaw, timeout, interruptible=True, retarget=None):
-        """Drive to (x, y, yaw). Returns (outcome, nav2_status, nav2_error), outcome one of
-        succeeded, aborted, canceled, rejected, timeout, interrupted (a dock call came).
-        retarget() may return a new (x, y, yaw) while driving; the goal is then replaced."""
-        handle = self.send(x, y, yaw)
-        if handle is None:
-            return 'rejected', '', ''
-        result = handle.get_result_async()
-        start, last_check = self.now(), self.now()
-        while rclpy.ok() and not result.done():
-            rclpy.spin_once(self, timeout_sec=0.05)
-            if self.now() - start > timeout:
-                self.cancel(handle)
-                return 'timeout', '', ''
-            if interruptible and self.call_due():
-                self.cancel(handle)
-                return 'interrupted', '', ''
-            if retarget and self.now() - last_check >= 1.0:
-                last_check = self.now()
-                new = retarget()
-                if new:
-                    newer = self.send(*new)
-                    if newer is not None:
-                        handle, result = newer, newer.get_result_async()
-        r = result.result()
-        status = STATUS.get(r.status, str(r.status))
-        code = getattr(r.result, 'error_code', 0)
-        msg = getattr(r.result, 'error_msg', '')
-        return status, status, f'{code} {msg}'.strip() if code else ''
+    def navigate(self, x, y, yaw, timeout, interruptible=True, retarget=None, retry=False):
+        """Drive to (x, y, yaw). Returns (outcome, nav2_status, nav2_error, attempts), outcome
+        one of succeeded, aborted, canceled, rejected, timeout, interrupted (a dock call came).
+        retarget() may return a new (x, y, yaw) while driving; the goal is then replaced.
+        With retry, an aborted goal is sent again until the timeout runs out."""
+        start, attempts = self.now(), 0
+        while True:
+            attempts += 1
+            handle = self.send(x, y, yaw)
+            if handle is None:
+                return 'rejected', '', '', attempts
+            result = handle.get_result_async()
+            last_check = self.now()
+            while rclpy.ok() and not result.done():
+                rclpy.spin_once(self, timeout_sec=0.05)
+                if self.now() - start > timeout:
+                    self.cancel(handle, result)
+                    return 'timeout', '', '', attempts
+                if interruptible and self.call_due():
+                    self.cancel(handle, result)
+                    return 'interrupted', '', '', attempts
+                if retarget and self.now() - last_check >= 1.0:
+                    last_check = self.now()
+                    new = retarget()
+                    if new:
+                        newer = self.send(*new)
+                        if newer is not None:
+                            handle, result = newer, newer.get_result_async()
+            r = result.result()
+            status = STATUS.get(r.status, str(r.status))
+            code = getattr(r.result, 'error_code', 0)
+            msg = getattr(r.result, 'error_msg', '')
+            error = f'{code} {msg}'.strip() if code else ''
+            if not (retry and status == 'aborted' and self.now() - start + 1.0 < timeout):
+                return status, status, error, attempts
+            self.get_logger().warn(f'Nav2 aborted ({error or "no error code"}); trying again')
+            self.wait(1.0)
 
     # Logging -----------------------------------------------------------------------------
 
@@ -277,13 +291,14 @@ class TaskRunner(Node):
                                + (f" ({row['reason']})" if row.get('reason') else '')
                                + f" after {row['duration_s']:.1f} s")
 
-    def job(self, kind, target, x, y, yaw, interruptible=True, timeout=None, retarget=None, check=None):
+    def job(self, kind, target, x, y, yaw, interruptible=True, timeout=None, retarget=None, check=None,
+            retry=False):
         row = {'kind': kind, 'target': target, 'goal_x': round(x, 3), 'goal_y': round(y, 3),
                'goal_yaw': round(yaw, 4), 't_start': round(self.now(), 2), **self.where()}
         path0 = self.odometer
-        outcome, status, error = self.navigate(x, y, yaw, timeout or self.p['task_timeout'],
-                                               interruptible, retarget)
-        row.update(t_end=round(self.now(), 2), nav2_status=status, nav2_error=error,
+        outcome, status, error, attempts = self.navigate(x, y, yaw, timeout or self.p['task_timeout'],
+                                                         interruptible, retarget, retry)
+        row.update(t_end=round(self.now(), 2), nav2_status=status, nav2_error=error, attempts=attempts,
                    path_m=round(self.odometer - path0, 3))
         row['duration_s'] = round(row['t_end'] - row['t_start'], 2)
         if self.robot:
@@ -306,12 +321,19 @@ class TaskRunner(Node):
         """Yaw from the robot to (x, y), so it does not spin on the spot at the goal."""
         return math.atan2(y - self.robot[1], x - self.robot[0]) if self.robot else 0.0
 
+    def stopped_short(self, row):
+        # Nav2's planner (tolerance 0.5 m) plans to the nearest free point when the goal is
+        # taken, e.g. by the resident standing on it, and then reports success.
+        return 'stopped_short' if row.get('err_xy_m', 0) > self.p['dock_xy_tol'] + 0.1 else ''
+
     def patrol_job(self, goal):
-        return self.job('patrol', goal['room'], goal['x'], goal['y'], self.facing(goal['x'], goal['y']))
+        return self.job('patrol', goal['room'], goal['x'], goal['y'], self.facing(goal['x'], goal['y']),
+                        check=self.stopped_short)
 
     def room_job(self, name):
         goal = max((g for g in self.home.patrol if g['room'] == name), key=lambda g: g['clearance'])
-        return self.job('room', name, goal['x'], goal['y'], self.facing(goal['x'], goal['y']))
+        return self.job('room', name, goal['x'], goal['y'], self.facing(goal['x'], goal['y']),
+                        check=self.stopped_short)
 
     def handover_spot(self):
         """A free spot approach_distance from the resident, nearest the robot, facing them."""
@@ -368,8 +390,9 @@ class TaskRunner(Node):
                 return 'off_dock'    # Nav2 believed it arrived; AMCL was off
             return ''
         self.n_returns += 1
+        # A docking robot keeps trying until its time is up, as a real one would.
         row = self.job('dock', d.get('room', 'dock'), d['x'], d['y'], d['yaw'], interruptible=False,
-                       timeout=self.p['dock_timeout'], check=check)
+                       timeout=self.p['dock_timeout'], check=check, retry=True)
         self.wait(self.p['rest'])
         self.schedule_call()
         return row

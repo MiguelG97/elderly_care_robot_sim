@@ -16,7 +16,7 @@ ros2 launch elderly_care_robot_sim navigation.launch.py world:=../homes/guest_fl
   x:=-2.35 y:=0.59 yaw:=0.00
 # third terminal: jobs and dock calls
 ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true \
-  -p home:=guest_flat -p task:=patrol -p returns:=5 -p seed:=1
+  -p home:=guest_flat -p task:=patrol -p returns:=5 -p seed:=1 -p social:=false
 ```
 
 The converter prints the launch pose for each home: the dock, so every run starts there
