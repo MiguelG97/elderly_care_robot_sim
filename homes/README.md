@@ -9,19 +9,25 @@ python3 tools/scan_to_world.py "Scans/Guest_Flat/Flat/OBJ/Main Guest Flat.zip" g
   --floorplan "Scans/Guest_Flat/Flat/Floorplan/Main Guest Flat.csv"
 colcon build --packages-select elderly_care_robot_sim   # from ~/ros2_ws
 ros2 launch elderly_care_robot_sim robot_in_house.launch.py \
-  world:=../homes/guest_flat/guest_flat.world x:=-0.55 y:=0.64 yaw:=0
+  world:=../homes/guest_flat/guest_flat.world x:=-2.35 y:=0.59 yaw:=0.00
 # second terminal: Nav2 on the home's generated map
 ros2 launch elderly_care_robot_sim navigation.launch.py world:=../homes/guest_flat/guest_flat.world \
   map:=$(ros2 pkg prefix elderly_care_robot_sim)/share/elderly_care_robot_sim/homes/guest_flat/map.yaml \
-  x:=-0.55 y:=0.64 yaw:=0
+  x:=-2.35 y:=0.59 yaw:=0.00
+# third terminal: jobs and dock calls
+ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true \
+  -p home:=guest_flat -p task:=patrol -p returns:=5 -p seed:=1
 ```
 
-The converter prints the spawn `x` and `y` for each home and writes `preview.png`, a top
-view to check by eye: obstacles black, doorways blue, floor TIAGo's centre can reach
-green, other floor inside white, outside grey, spawn red.
+The converter prints the launch pose for each home: the dock, so every run starts there
+(the world has a green dock plate at it). The dock is a suggestion: if you move it in
+`annotations.yaml`, also move the `<model name='dock'>` pose in the world file. It also
+writes `preview.png`, a top view to check by eye: obstacles black, doorways blue, floor
+TIAGo's centre can reach green, other floor inside white, outside grey, most open spot red.
 
 Each home also gets `annotations.yaml` (rooms named from the floor-plan CSV, doorways and
-the rooms they join, passages narrower than 1.2 m, a suggested dock pose, resident spots),
+the rooms they join, passages narrower than 1.2 m, a suggested dock pose, resident spots,
+patrol goals covering every room the robot's centre can reach, and `unreachable_rooms`),
 `rooms.pgm` (room id per map cell) and `annotations.png` to check them: rooms coloured,
 doorways blue, narrow passages orange, dock red, resident spots purple. The converter
 prints which colour is which room. Only the CSV's per-room area and dimension rows are

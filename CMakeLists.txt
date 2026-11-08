@@ -8,6 +8,7 @@ install(PROGRAMS
   scripts/social_zones.py
   scripts/send_goal.py
   scripts/gz_description.py
+  scripts/task_runner.py
   DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

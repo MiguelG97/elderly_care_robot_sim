@@ -9,11 +9,12 @@ Writes homes/<name>/ (git-ignored, the homes are private):
   model.sdf, model.config      static model of the home
   meshes/visual.obj + .mtl     everything except the door panels, so doorways are open
   meshes/walls.obj             walls only, used as the collision mesh
-  <name>.world                 the world to launch
+  <name>.world                 the world to launch, with a dock plate at the dock pose
   map.pgm, map.yaml            Nav2 map in Gazebo world coordinates, for navigation.launch.py
   annotations.yaml, rooms.pgm  rooms (named from the floor-plan CSV given with --floorplan),
-                               doorways, narrow passages, a suggested dock pose and resident
-                               spots; rooms.pgm holds each cell's room id on the map's grid
+                               doorways, narrow passages, a suggested dock pose, resident
+                               spots and patrol goals covering every room the robot can reach;
+                               rooms.pgm holds each cell's room id on the map's grid
   annotations.png              the same, to check by eye
   routine.png                  the resident's walking routine, which resident_routine.py
                                writes into <name>.world (run it alone to change speed or pauses)
@@ -49,6 +50,9 @@ MAP_BAND = (0.05, 0.40)
 NARROW = 1.2          # passages narrower than this are where a robot and a person cannot pass
                       # each other (Hall's personal-distance limit)
 FLOOR_FURNITURE = 0.3  # furniture starting higher than this sits on something else or hangs on a wall
+PATROL_SPACING = 1.5   # patrol goals at least this far apart: the laser (~5 m range) sees the
+                       # floor between them
+PATROL_CLEARANCE = ROBOT_RADIUS + 0.1  # Nav2 stops short of goals inside the inflated costmap
 
 
 def read_scan(path):
@@ -507,6 +511,22 @@ def annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny, pla
         k = max(r, key=lambda k: clear[k])
         spots.append({'room': names[i], 'x': centre(k)[0], 'y': centre(k)[1]})
 
+    # Patrol goals: in every room the robot's centre can reach, the most open spot, then the
+    # most open spots at least PATROL_SPACING from the goals already chosen.
+    patrol, unreachable = [], []
+    for i, r in enumerate(keep):
+        cells = [k for k in r if k in reach]
+        if not cells:
+            unreachable.append(names[i])
+            continue
+        roomy = [k for k in cells if clear[k] >= PATROL_CLEARANCE] or [max(cells, key=lambda k: clear[k])]
+        chosen = []
+        for k in sorted(roomy, key=lambda k: -clear[k]):
+            cx, cy = centre(k)
+            if all(math.hypot(cx - px, cy - py) >= PATROL_SPACING for px, py in chosen):
+                chosen.append((cx, cy))
+                patrol.append({'room': names[i], 'x': cx, 'y': cy, 'clearance': clear[k]})
+
     with open(os.path.join(out, 'rooms.pgm'), 'wb') as f:
         f.write(f'P5\n{nx} {ny}\n255\n'.encode())
         for y in range(ny - 1, -1, -1):
@@ -541,6 +561,10 @@ def annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny, pla
     lines.append('resident_spots:  # most open floor in each room the resident uses')
     for sp in spots:
         lines.append(f'  - {{room: "{sp["room"]}", x: {sp["x"]:.2f}, y: {sp["y"]:.2f}}}')
+    lines.append('patrol:  # goals covering every room the robot can reach (task_runner.py)')
+    for p in patrol:
+        lines.append(f'  - {{room: "{p["room"]}", x: {p["x"]:.2f}, y: {p["y"]:.2f}, clearance: {p["clearance"]:.2f}}}')
+    lines.append('unreachable_rooms: [' + ', '.join(f'"{n}"' for n in unreachable) + ']  # no spot TIAGo\'s centre can reach')
     with open(os.path.join(out, 'annotations.yaml'), 'w') as f:
         f.write('\n'.join(lines) + '\n')
 
@@ -590,6 +614,8 @@ def annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny, pla
     print(f'Doors: {len(door_list)}; narrow passages (< {NARROW} m): {len(passage_list)}')
     print('Dock (suggested, red on the image): ' +
           (f'x={centre(dock[1])[0]:.2f} y={centre(dock[1])[1]:.2f} in {dock[3]}' if dock else 'none found'))
+    print(f'Patrol goals: {len(patrol)}' + (f'; rooms the robot cannot reach: {", ".join(unreachable)}' if unreachable else ''))
+    return (*centre(dock[1]), dock[2]) if dock else None
 
 
 MODEL_SDF = """<?xml version="1.0"?>
@@ -629,6 +655,25 @@ MODEL_CONFIG = """<?xml version="1.0"?>
 </model>
 """
 
+# Visual only: the robot parks on top of it, and at 1 cm it stays under the laser's plane.
+DOCK = """    <model name='dock'>
+      <static>true</static>
+      <pose>{x:.3f} {y:.3f} 0 0 0 {yaw:.4f}</pose>
+      <link name='plate'>
+        <visual name='plate'>
+          <pose>0 0 0.005 0 0 0</pose>
+          <geometry><box><size>0.6 0.6 0.01</size></box></geometry>
+          <material><ambient>0.1 0.6 0.2 1</ambient><diffuse>0.1 0.6 0.2 1</diffuse></material>
+        </visual>
+        <visual name='arrow'>
+          <pose>0.15 0 0.011 0 0 0</pose>
+          <geometry><box><size>0.25 0.06 0.002</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+"""
+
 # Physics block matches worlds/small_house.world so results are comparable across homes.
 WORLD = """<?xml version="1.0"?>
 <sdf version="1.10">
@@ -660,7 +705,7 @@ WORLD = """<?xml version="1.0"?>
     <include>
       <uri>model://{name}</uri>
     </include>
-  </world>
+{dock}  </world>
 </sdf>
 """
 
@@ -703,9 +748,6 @@ def main():
                                  fsx=slab['size'][0], fsy=slab['size'][1], fsz=slab['size'][2]))
     with open(os.path.join(out, 'model.config'), 'w') as f:
         f.write(MODEL_CONFIG.format(name=args.name))
-    with open(os.path.join(out, f'{args.name}.world'), 'w') as f:
-        f.write(WORLD.format(name=args.name, cx=(lo[0] + hi[0]) / 2, cy=lo[1] - 2.0,
-                             cz=max(slab['size'][0], slab['size'][1]) * 1.2))
 
     x0, y0 = lo[0] - GRID, lo[1] - GRID
     nx = int((hi[0] - lo[0]) / GRID) + 3
@@ -767,8 +809,12 @@ def main():
         f.write(f'image: map.pgm\nmode: trinary\nresolution: {GRID}\norigin: [{x0:.3f}, {y0:.3f}, 0]\n'
                 'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
 
-    annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny,
-             read_floorplan(args.floorplan) if args.floorplan else {}, (sx, sy))
+    dock = annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny,
+                    read_floorplan(args.floorplan) if args.floorplan else {}, (sx, sy))
+    with open(os.path.join(out, f'{args.name}.world'), 'w') as f:
+        f.write(WORLD.format(name=args.name, cx=(lo[0] + hi[0]) / 2, cy=lo[1] - 2.0,
+                             cz=max(slab['size'][0], slab['size'][1]) * 1.2,
+                             dock=DOCK.format(x=dock[0], y=dock[1], yaw=dock[2]) if dock else ''))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import resident_routine
     resident_routine.build(out)
@@ -779,7 +825,8 @@ def main():
     print(f'Free floor inside: {free * GRID * GRID:.1f} m2. TIAGo (radius {ROBOT_RADIUS} m) can cover '
           f'{100 * covered / max(free, 1):.0f}% of it; its centre can reach {100 * len(region) / max(free, 1):.0f}%.')
     print(f'Spawn (most open spot): x={sx:.2f} y={sy:.2f}, clearance {clear[spawn]:.2f} m')
-    pose = f'x:={sx:.2f} y:={sy:.2f} yaw:=0'
+    # Runs start on the dock, so every return to it is measured from the same place.
+    pose = f'x:={dock[0]:.2f} y:={dock[1]:.2f} yaw:={dock[2]:.2f}' if dock else f'x:={sx:.2f} y:={sy:.2f} yaw:=0'
     print('Launch with:')
     print(f'  ros2 launch elderly_care_robot_sim robot_in_house.launch.py '
           f'world:=../homes/{args.name}/{args.name}.world {pose}')
