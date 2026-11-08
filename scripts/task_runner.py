@@ -31,7 +31,8 @@ time is up), stays rest seconds, then carries on. The run ends
 after that many returns, or after duration sim seconds if set (0 = no limit). With
 returns = 0, room and resident do their job once and exit.
 
-social is only written to the log: pass the same value as navigation.launch.py's social:=.
+social is only written to the log: pass the same value as navigation.launch.py's social:=
+(both default to false).
 
 Docked = Nav2 succeeded AND the true pose (/ground_truth/odom, not AMCL) is within
 dock_xy_tol and dock_yaw_tol of the dock pose. The defaults equal Nav2's goal checker,
@@ -153,7 +154,7 @@ class TaskRunner(Node):
             ('rest', 10.0), ('duration', 0.0), ('resident_wait', 20.0),
             ('approach_distance', 1.0), ('robot_radius', 0.275),
             ('dock_xy_tol', 0.25), ('dock_yaw_tol', 0.25),
-            ('social', 'unknown'), ('log_dir', os.path.expanduser('~/runs')), ('run_id', '')])
+            ('social', False), ('log_dir', os.path.expanduser('~/runs')), ('run_id', '')])
         self.p = {q.name: q.value for q in p}
         if self.p['task'] not in ('patrol', 'room', 'resident', 'mixed'):
             raise SystemExit(f"task must be patrol, room, resident or mixed, not {self.p['task']!r}")
