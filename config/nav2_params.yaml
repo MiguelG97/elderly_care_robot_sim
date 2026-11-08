@@ -45,8 +45,10 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      # Tight enough that the true pose (AMCL is off by up to ~0.1 m) still lands within
+      # task_runner.py's 0.25 m docking check; at 0.25 the robot stopped 0.35 m off the dock.
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.15
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
       time_steps: 28
@@ -144,7 +146,7 @@ local_costmap:
       rolling_window: true
       width: 3
       height: 3
-      resolution: 0.06
+      resolution: 0.05   # same as the maps, so walls and 0.8 m doorways are not resampled
       robot_radius: 0.275
       plugins: ["static_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
@@ -190,7 +192,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       robot_radius: 0.275
-      resolution: 0.06
+      resolution: 0.05   # same as the maps, so walls and 0.8 m doorways are not resampled
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:

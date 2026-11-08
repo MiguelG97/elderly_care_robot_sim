@@ -35,13 +35,15 @@ social is only written to the log: pass the same value as navigation.launch.py's
 (both default to false).
 
 Docked = Nav2 succeeded AND the true pose (/ground_truth/odom, not AMCL) is within
-dock_xy_tol and dock_yaw_tol of the dock pose. The defaults equal Nav2's goal checker,
-which cannot stop more precisely; the final errors are logged for stricter thresholds.
+dock_xy_tol and dock_yaw_tol of the dock pose (0.25 m, 0.25 rad: Nav2's goal checker stops
+within 0.15 of where AMCL thinks it is, plus room for AMCL's error). The final errors are
+logged, so stricter thresholds can be applied in the analysis.
 
 Output in log_dir/<run_id>/ (run_id defaults to <home>_<task>_seed<seed>):
   events.csv  one row per job or return: times, result, failure reason, Nav2 error, path
-              driven (ground truth), final error, and where the robot and resident were
-              (room, nearest doorway) when it started
+              driven (ground truth), final error, how far AMCL's estimate was from the true
+              pose at the end, and where the robot and resident were (room, nearest
+              doorway) when it started
   run.yaml    every parameter, ROS distro, start time and the checksums of the home's
               files: what is needed to repeat the run
 Each row is also published as JSON on /task_events, so a bag holds it. Record with:
@@ -60,6 +62,7 @@ import yaml
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
 from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -68,6 +71,7 @@ from std_msgs.msg import String
 FIELDS = ['run_id', 'home', 'social', 'seed', 'n', 'kind', 'target', 'goal_x', 'goal_y', 'goal_yaw',
           't_start', 't_end', 'duration_s', 'result', 'reason', 'nav2_status', 'nav2_error',
           'attempts', 'path_m', 'end_x', 'end_y', 'err_xy_m', 'err_yaw_rad',
+          'loc_err_m', 'loc_err_yaw_rad',
           'robot_x', 'robot_y', 'robot_room', 'resident_x', 'resident_y', 'resident_room',
           'resident_doorway', 'resident_dist_m']
 STATUS = {GoalStatus.STATUS_SUCCEEDED: 'succeeded', GoalStatus.STATUS_CANCELED: 'canceled',
@@ -76,6 +80,11 @@ STATUS = {GoalStatus.STATUS_SUCCEEDED: 'succeeded', GoalStatus.STATUS_CANCELED: 
 
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
+
+
+def pose2d(pose):
+    q = pose.orientation
+    return pose.position.x, pose.position.y, math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
 
 def read_pgm(path):
@@ -173,19 +182,23 @@ class TaskRunner(Node):
         self.robot = None          # (x, y, yaw) from ground truth
         self.odometer = 0.0        # metres driven, ground truth
         self.resident = None       # (x, y)
+        self.amcl = None           # (x, y, yaw): where Nav2 thinks the robot is
         self.create_subscription(Odometry, '/ground_truth/odom', self.on_robot, 10)
         self.create_subscription(Odometry, '/people/odom', self.on_person, 10)
+        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.on_amcl, 10)
         self.events = self.create_publisher(String, '/task_events', 10)
         self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.n = 0
         self.next_call = None
 
     def on_robot(self, msg):
-        q, pos = msg.pose.pose.orientation, msg.pose.pose.position
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        pose = pose2d(msg.pose.pose)
         if self.robot:
-            self.odometer += math.hypot(pos.x - self.robot[0], pos.y - self.robot[1])
-        self.robot = (pos.x, pos.y, yaw)
+            self.odometer += math.hypot(pose[0] - self.robot[0], pose[1] - self.robot[1])
+        self.robot = pose
+
+    def on_amcl(self, msg):
+        self.amcl = pose2d(msg.pose.pose)
 
     def on_person(self, msg):
         if msg.child_frame_id in ('resident', ''):
@@ -306,6 +319,11 @@ class TaskRunner(Node):
             row.update(end_x=round(self.robot[0], 3), end_y=round(self.robot[1], 3),
                        err_xy_m=round(math.hypot(self.robot[0] - x, self.robot[1] - y), 3),
                        err_yaw_rad=round(abs(wrap(self.robot[2] - yaw)), 4))
+            if self.amcl:
+                # AMCL publishes only after the robot moves update_min_d / update_min_a, so
+                # this is its latest estimate, which can lag a final turn on the spot.
+                row.update(loc_err_m=round(math.hypot(self.amcl[0] - self.robot[0], self.amcl[1] - self.robot[1]), 3),
+                           loc_err_yaw_rad=round(abs(wrap(self.amcl[2] - self.robot[2])), 4))
         if outcome == 'succeeded':
             reason = check(row) if check else ''
             row.update(result='fail' if reason else 'success', reason=reason)
@@ -325,7 +343,7 @@ class TaskRunner(Node):
     def stopped_short(self, row):
         # Nav2's planner (tolerance 0.5 m) plans to the nearest free point when the goal is
         # taken, e.g. by the resident standing on it, and then reports success.
-        return 'stopped_short' if row.get('err_xy_m', 0) > self.p['dock_xy_tol'] + 0.1 else ''
+        return 'stopped_short' if row.get('err_xy_m', 0) > self.p['dock_xy_tol'] else ''
 
     def patrol_job(self, goal):
         return self.job('patrol', goal['room'], goal['x'], goal['y'], self.facing(goal['x'], goal['y']),

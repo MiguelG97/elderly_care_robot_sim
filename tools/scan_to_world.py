@@ -479,13 +479,15 @@ def annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny, pla
         passage_list.append({'x': px, 'y': py, 'width': 2 * clear[k], 'length': len(cells) * GRID,
                              'room': room_at(px, py), 'cells': cells})
 
-    # Dock: next to a wall (robot centre 0.33-0.45 m from it) with open floor in front, in a
-    # room the resident uses, at least 1 m from a doorway; facing into the room. A suggestion
-    # to check on the image.
+    # Dock: next to a wall with open floor in front, in a room the resident uses, at least 1 m
+    # from a doorway; facing into the room. A suggestion to check on the image. The robot's
+    # centre is 0.50-0.60 m from the wall, where Nav2's inflation (0.55 m) has nearly faded:
+    # at 0.33-0.45 m Nav2 reported arriving while 0.35 m off, and got stuck turning there.
+    # It stands for the pose in front of a real dock, not the charging contacts.
     service = ('bath', 'closet', 'wc', 'toilet', 'storage', 'cupboard', 'utility', 'unlabelled')
     dock = None
     for k in reach:
-        if not 0.33 <= clear[k] <= 0.45:
+        if not 0.50 <= clear[k] <= 0.60:
             continue
         x, y = k % nx, k // nx
         if not (0 < x < nx - 1 and 0 < y < ny - 1):
