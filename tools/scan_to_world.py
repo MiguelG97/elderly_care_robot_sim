@@ -795,10 +795,9 @@ def main():
         rows += [[c for px in zip(row[0::3], row[1::3], row[2::3]) for c in px * PREVIEW_SCALE]] * PREVIEW_SCALE
     write_png(os.path.join(out, 'preview.png'), rows)
 
-    # Two maps. map.pgm is what the laser sees in its height band, for AMCL. costmap.pgm adds
-    # each furniture box, which is what the robot bumps into (the laser sees only legs), for
-    # the costmaps and planning. One filled-box map for both let AMCL slide 0.3 m: laser hits
-    # anywhere inside a filled box matched it equally well.
+    # Two maps. map.pgm is what the laser sees in its height band, for AMCL: a box it sees
+    # only by its legs must not be filled there. costmap.pgm adds each furniture box, which is
+    # what the robot bumps into, for the costmaps and planning.
     seen = close_gaps(occupancy(verts, groups, floor_z, x0, y0, nx, ny, band=MAP_BAND), nx, ny)
     boxed = list(seen)
     for fx, fy, length, width, yaw in footprints:

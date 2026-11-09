@@ -9,11 +9,11 @@ python3 tools/scan_to_world.py "Scans/Guest_Flat/Flat/OBJ/Main Guest Flat.zip" g
   --floorplan "Scans/Guest_Flat/Flat/Floorplan/Main Guest Flat.csv"
 colcon build --packages-select elderly_care_robot_sim   # from ~/ros2_ws
 ros2 launch elderly_care_robot_sim robot_in_house.launch.py \
-  world:=../homes/guest_flat/guest_flat.world x:=-2.35 y:=0.59 yaw:=0.00
+  world:=../homes/guest_flat/guest_flat.world x:=-2.20 y:=0.59 yaw:=0.00
 # second terminal: Nav2 on the home's generated map
 ros2 launch elderly_care_robot_sim navigation.launch.py world:=../homes/guest_flat/guest_flat.world \
   map:=$(ros2 pkg prefix elderly_care_robot_sim)/share/elderly_care_robot_sim/homes/guest_flat/map.yaml \
-  x:=-2.35 y:=0.59 yaw:=0.00
+  x:=-2.20 y:=0.59 yaw:=0.00
 # third terminal: jobs and dock calls
 ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true \
   -p home:=guest_flat -p task:=patrol -p returns:=5 -p seed:=1 -p social:=false

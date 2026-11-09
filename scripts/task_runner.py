@@ -5,10 +5,10 @@ random moments, logging every job and every return.
 
 Start the home with the robot on its dock (the converter prints the dock pose) and Nav2:
   ros2 launch elderly_care_robot_sim robot_in_house.launch.py world:=../homes/guest_flat/guest_flat.world \
-    x:=-2.35 y:=0.59 yaw:=0.00
+    x:=-2.20 y:=0.59 yaw:=0.00
   ros2 launch elderly_care_robot_sim navigation.launch.py world:=../homes/guest_flat/guest_flat.world \
     map:=$(ros2 pkg prefix elderly_care_robot_sim)/share/elderly_care_robot_sim/homes/guest_flat/map.yaml \
-    x:=-2.35 y:=0.59 yaw:=0.00
+    x:=-2.20 y:=0.59 yaw:=0.00
 Then one of:
   ros2 run elderly_care_robot_sim task_runner.py --ros-args -p use_sim_time:=true -p home:=guest_flat \
     -p task:=patrol -p returns:=5 -p seed:=1 -p social:=false
@@ -18,7 +18,8 @@ Then one of:
     -p task:=resident
 
 Tasks (goals come from the home's annotations.yaml, written by tools/scan_to_world.py):
-  patrol    visit the patrol goals (every room the robot can reach), nearest first, looping
+  patrol    visit the patrol goals (every room the robot can reach), nearest first, looping;
+            skips rooms named in patrol_skip and goals within 0.5 m of the dock
   room      go to the most open spot of the named room
   resident  stand approach_distance from the resident, facing them, as if handing something
             over; repeated every resident_wait seconds while returns are still due
@@ -41,8 +42,9 @@ logged, so stricter thresholds can be applied in the analysis.
 
 Output in log_dir/<run_id>/ (run_id defaults to <home>_<task>_seed<seed>):
   events.csv  one row per job or return: times, result, failure reason, Nav2 error, path
-              driven (ground truth), final error, how far AMCL's estimate was from the true
-              pose at the end, and where the robot and resident were (room, nearest
+              driven (ground truth), final error, how far Nav2's pose estimate (map ->
+              base_footprint, i.e. AMCL plus odometry since its last update) was from the
+              true pose at the end, and where the robot and resident were (room, nearest
               doorway) when it started
   run.yaml    every parameter, ROS distro, start time and the checksums of the home's
               files: what is needed to repeat the run
@@ -62,11 +64,12 @@ import yaml
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import String
+from tf2_ros import Buffer, TransformListener
 
 FIELDS = ['run_id', 'home', 'social', 'seed', 'n', 'kind', 'target', 'goal_x', 'goal_y', 'goal_yaw',
           't_start', 't_end', 'duration_s', 'result', 'reason', 'nav2_status', 'nav2_error',
@@ -163,7 +166,7 @@ class TaskRunner(Node):
             ('rest', 10.0), ('duration', 0.0), ('resident_wait', 20.0),
             ('approach_distance', 1.0), ('robot_radius', 0.275),
             ('dock_xy_tol', 0.25), ('dock_yaw_tol', 0.25),
-            ('social', False), ('log_dir', os.path.expanduser('~/runs')), ('run_id', '')])
+            ('social', False), ('patrol_skip', 'closet,cupboard,storage'), ('log_dir', os.path.expanduser('~/runs')), ('run_id', '')])
         self.p = {q.name: q.value for q in p}
         if self.p['task'] not in ('patrol', 'room', 'resident', 'mixed'):
             raise SystemExit(f"task must be patrol, room, resident or mixed, not {self.p['task']!r}")
@@ -176,16 +179,27 @@ class TaskRunner(Node):
         if self.p['task'] == 'room' and self.p['room'] not in {g['room'] for g in self.home.patrol}:
             rooms = sorted({g['room'] for g in self.home.patrol})
             raise SystemExit(f"room must be one the robot can reach: {', '.join(rooms)}")
+        skip = [w.strip().lower() for w in self.p['patrol_skip'].split(',') if w.strip()]
+        dock = self.home.dock or {}
+        # A care robot has no reason to drive into a closet, and closets barely fit it: their
+        # goals ended 0.3 m short or with no path. A goal on the dock checks nothing.
+        self.tour_goals = [g for g in self.home.patrol
+                           if not any(w in g['room'].lower() for w in skip)
+                           and math.hypot(g['x'] - dock.get('x', 1e9), g['y'] - dock.get('y', 1e9)) >= 0.5]
+        if not self.tour_goals and self.p['task'] in ('patrol', 'mixed'):
+            raise SystemExit(f"{self.p['home']}: every patrol goal is skipped; change patrol_skip")
         self.rng = random.Random(self.p['seed'])
         self.run_id = self.p['run_id'] or f"{self.p['home']}_{self.p['task']}_seed{self.p['seed']}"
 
         self.robot = None          # (x, y, yaw) from ground truth
         self.odometer = 0.0        # metres driven, ground truth
         self.resident = None       # (x, y)
-        self.amcl = None           # (x, y, yaw): where Nav2 thinks the robot is
         self.create_subscription(Odometry, '/ground_truth/odom', self.on_robot, 10)
         self.create_subscription(Odometry, '/people/odom', self.on_person, 10)
-        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.on_amcl, 10)
+        # /amcl_pose is published only after update_min_d / update_min_a of motion, so it lags;
+        # map -> base_footprint is what Nav2 itself uses.
+        self.tf = Buffer()
+        self.tf_listener = TransformListener(self.tf, self)
         self.events = self.create_publisher(String, '/task_events', 10)
         self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.n = 0
@@ -197,8 +211,15 @@ class TaskRunner(Node):
             self.odometer += math.hypot(pose[0] - self.robot[0], pose[1] - self.robot[1])
         self.robot = pose
 
-    def on_amcl(self, msg):
-        self.amcl = pose2d(msg.pose.pose)
+    def estimate(self):
+        """(x, y, yaw) where Nav2 thinks the robot is, or None."""
+        try:
+            t = self.tf.lookup_transform('map', 'base_footprint', Time()).transform
+        except Exception:
+            return None
+        q = t.rotation
+        return (t.translation.x, t.translation.y,
+                math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
 
     def on_person(self, msg):
         if msg.child_frame_id in ('resident', ''):
@@ -319,11 +340,10 @@ class TaskRunner(Node):
             row.update(end_x=round(self.robot[0], 3), end_y=round(self.robot[1], 3),
                        err_xy_m=round(math.hypot(self.robot[0] - x, self.robot[1] - y), 3),
                        err_yaw_rad=round(abs(wrap(self.robot[2] - yaw)), 4))
-            if self.amcl:
-                # AMCL publishes only after the robot moves update_min_d / update_min_a, so
-                # this is its latest estimate, which can lag a final turn on the spot.
-                row.update(loc_err_m=round(math.hypot(self.amcl[0] - self.robot[0], self.amcl[1] - self.robot[1]), 3),
-                           loc_err_yaw_rad=round(abs(wrap(self.amcl[2] - self.robot[2])), 4))
+            est = self.estimate()
+            if est:
+                row.update(loc_err_m=round(math.hypot(est[0] - self.robot[0], est[1] - self.robot[1]), 3),
+                           loc_err_yaw_rad=round(abs(wrap(est[2] - self.robot[2])), 4))
         if outcome == 'succeeded':
             reason = check(row) if check else ''
             row.update(result='fail' if reason else 'success', reason=reason)
@@ -463,7 +483,7 @@ class TaskRunner(Node):
                 break
             if task == 'patrol':
                 if not tour:
-                    tour = self.nearest_first(self.home.patrol)
+                    tour = self.nearest_first(self.tour_goals)
                 self.patrol_job(tour.pop(0))
             elif task == 'room':
                 if done_once:
@@ -478,7 +498,7 @@ class TaskRunner(Node):
                 if self.rng.random() < 0.5:
                     self.resident_job()
                 else:
-                    self.patrol_job(self.rng.choice(self.home.patrol))
+                    self.patrol_job(self.rng.choice(self.tour_goals))
             done_once = True
         self.get_logger().info(f'Done: {self.n} events logged to {self.csv_path}')
 
