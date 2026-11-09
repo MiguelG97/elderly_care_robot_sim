@@ -5,7 +5,7 @@ Give a converted home a resident who walks a daily routine between its rooms.
   python3 tools/resident_routine.py homes/guest_flat
   python3 tools/resident_routine.py homes/guest_flat --dwell 45 --speed 0.6
 
-Reads the home's annotations.yaml, rooms.pgm and map.pgm (written by scan_to_world.py,
+Reads the home's annotations.yaml, rooms.pgm and costmap.pgm (written by scan_to_world.py,
 which also calls this at the end) and writes <actor name='resident'> into the home's
 world file, replacing any earlier one. people_publisher.py reads the same actor, so
 /people/odom follows it. Also writes routine.png: the walking path (orange) and the
@@ -158,7 +158,7 @@ def shortcut(path, ok, nx):
 def build(home, speed=SPEED, dwell=30.0):
     name = os.path.basename(os.path.normpath(home))
     ann = read_annotations(os.path.join(home, 'annotations.yaml'))
-    nx, ny, mp = read_pgm(os.path.join(home, 'map.pgm'))
+    nx, ny, mp = read_pgm(os.path.join(home, 'costmap.pgm'))
     _, _, rooms = read_pgm(os.path.join(home, 'rooms.pgm'))
     x0, y0 = ann['grid']['origin']
 

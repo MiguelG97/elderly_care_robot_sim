@@ -10,7 +10,9 @@ Writes homes/<name>/ (git-ignored, the homes are private):
   meshes/visual.obj + .mtl     everything except the door panels, so doorways are open
   meshes/walls.obj             walls only, used as the collision mesh
   <name>.world                 the world to launch, with a dock plate at the dock pose
-  map.pgm, map.yaml            Nav2 map in Gazebo world coordinates, for navigation.launch.py
+  map.pgm, map.yaml            Nav2 map in Gazebo world coordinates: what the laser sees, for AMCL
+  costmap.pgm, costmap.yaml    the same plus furniture boxes, for planning (navigation.launch.py
+                               serves it on /costmap_map when it sits next to map.yaml)
   annotations.yaml, rooms.pgm  rooms (named from the floor-plan CSV given with --floorplan),
                                doorways, narrow passages, a suggested dock pose, resident
                                spots and patrol goals covering every room the robot can reach;
@@ -793,23 +795,27 @@ def main():
         rows += [[c for px in zip(row[0::3], row[1::3], row[2::3]) for c in px * PREVIEW_SCALE]] * PREVIEW_SCALE
     write_png(os.path.join(out, 'preview.png'), rows)
 
-    walls = close_gaps(occupancy(verts, groups, floor_z, x0, y0, nx, ny, band=MAP_BAND), nx, ny)
-    # Furniture is drawn as its collision box, which is what the robot bumps into; the
-    # laser only sees legs inside it, and points inside an obstacle still suit AMCL.
+    # Two maps. map.pgm is what the laser sees in its height band, for AMCL. costmap.pgm adds
+    # each furniture box, which is what the robot bumps into (the laser sees only legs), for
+    # the costmaps and planning. One filled-box map for both let AMCL slide 0.3 m: laser hits
+    # anywhere inside a filled box matched it equally well.
+    seen = close_gaps(occupancy(verts, groups, floor_z, x0, y0, nx, ny, band=MAP_BAND), nx, ny)
+    boxed = list(seen)
     for fx, fy, length, width, yaw in footprints:
         c, s_ = math.cos(yaw), math.sin(yaw)
         for k in range(nx * ny):
             px, py = x0 + (k % nx + 0.5) * GRID - fx, y0 + (k // nx + 0.5) * GRID - fy
             if abs(px * c + py * s_) <= length / 2 and abs(-px * s_ + py * c) <= width / 2:
-                walls[k] = 1
-    with open(os.path.join(out, 'map.pgm'), 'wb') as f:
-        f.write(f'P5\n{nx} {ny}\n255\n'.encode())
-        for y in range(ny - 1, -1, -1):
-            f.write(bytes(0 if walls[y * nx + x] else 205 if outside[y * nx + x] else 254
-                          for x in range(nx)))
-    with open(os.path.join(out, 'map.yaml'), 'w') as f:
-        f.write(f'image: map.pgm\nmode: trinary\nresolution: {GRID}\norigin: [{x0:.3f}, {y0:.3f}, 0]\n'
-                'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
+                boxed[k] = 1
+    for stem, cells in (('map', seen), ('costmap', boxed)):
+        with open(os.path.join(out, f'{stem}.pgm'), 'wb') as f:
+            f.write(f'P5\n{nx} {ny}\n255\n'.encode())
+            for y in range(ny - 1, -1, -1):
+                f.write(bytes(0 if cells[y * nx + x] else 205 if outside[y * nx + x] else 254
+                              for x in range(nx)))
+        with open(os.path.join(out, f'{stem}.yaml'), 'w') as f:
+            f.write(f'image: {stem}.pgm\nmode: trinary\nresolution: {GRID}\norigin: [{x0:.3f}, {y0:.3f}, 0]\n'
+                    'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
 
     dock = annotate(out, verts, groups, floor_z, occ, clear, reach, x0, y0, nx, ny,
                     read_floorplan(args.floorplan) if args.floorplan else {}, (sx, sy))

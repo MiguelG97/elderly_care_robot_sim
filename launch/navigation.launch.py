@@ -45,6 +45,14 @@ def launch_setup(context):
         package='nav2_map_server', executable='map_server', name='map_server', output='screen',
         parameters=[sim_time, {'yaml_filename': map_yaml}])
 
+    # The costmaps read /costmap_map. A scanned home has costmap.yaml next to map.yaml (map:
+    # what the laser sees, for AMCL; costmap: plus furniture boxes); other maps serve both.
+    beside = os.path.join(os.path.dirname(arg('map')), 'costmap.yaml')
+    costmap_map_server = Node(
+        package='nav2_map_server', executable='map_server', name='costmap_map_server', output='screen',
+        parameters=[sim_time, {'yaml_filename': beside if os.path.isfile(beside) else arg('map'),
+                               'topic_name': 'costmap_map'}])
+
     amcl = Node(
         package='nav2_amcl', executable='amcl', name='amcl', output='screen',
         parameters=[params, sim_time, {'initial_pose': {
@@ -54,7 +62,7 @@ def launch_setup(context):
         package='nav2_lifecycle_manager', executable='lifecycle_manager',
         name='lifecycle_manager_map', output='screen',
         parameters=[sim_time, {'autostart': True,
-                               'node_names': ['map_server', 'amcl']}])
+                               'node_names': ['map_server', 'costmap_map_server', 'amcl']}])
 
     # Only the Nav2 servers the demo needs (planner, controller, recovery behaviours,
     # behaviour tree). Nav2's full navigation_launch.py also starts the smoother,
@@ -100,7 +108,7 @@ def launch_setup(context):
         arguments=['-d', view],
         parameters=[sim_time], condition=IfCondition(rviz))
 
-    return [map_server, amcl, map_lifecycle, *navigation, people, zones, rviz_node]
+    return [map_server, costmap_map_server, amcl, map_lifecycle, *navigation, people, zones, rviz_node]
 
 
 def generate_launch_description():

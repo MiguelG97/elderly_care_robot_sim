@@ -108,7 +108,7 @@ class Home:
             self.ann = yaml.safe_load(f)
         g = self.ann['grid']
         self.res, (self.x0, self.y0) = g['resolution'], g['origin']
-        self.nx, self.ny, self.map = read_pgm(os.path.join(folder, 'map.pgm'))
+        self.nx, self.ny, self.map = read_pgm(os.path.join(folder, 'costmap.pgm'))
         _, _, self.rooms = read_pgm(os.path.join(folder, 'rooms.pgm'))
         self.names = {r['id']: r['name'] for r in self.ann['rooms']}
         self.dock = self.ann.get('dock')

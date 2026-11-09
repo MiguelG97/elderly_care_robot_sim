@@ -25,6 +25,10 @@ The converter prints the launch pose for each home: the dock, so every run start
 writes `preview.png`, a top view to check by eye: obstacles black, doorways blue, floor
 TIAGo's centre can reach green, other floor inside white, outside grey, most open spot red.
 
+There are two maps: `map.pgm` is what the robot's laser sees (AMCL localises on it) and
+`costmap.pgm` adds each furniture box (Nav2 plans on it). Pass `map.yaml`; the navigation
+launch picks up `costmap.yaml` next to it.
+
 Each home also gets `annotations.yaml` (rooms named from the floor-plan CSV, doorways and
 the rooms they join, passages narrower than 1.2 m, a suggested dock pose, resident spots,
 patrol goals covering every room the robot's centre can reach, and `unreachable_rooms`),
