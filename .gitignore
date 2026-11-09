@@ -26,3 +26,5 @@ Scans/
 
 # Homes generated from the scans by tools/scan_to_world.py: private, like Scans/
 homes/*/
+
+docs/
