@@ -175,8 +175,10 @@ class ScanCheck(Node):
         m, offset, scale, mirror = best
         print(f'Best fit: yaw offset {offset:+.2f} rad, angle scale {scale:.2f}, '
               f'{"mirrored" if mirror else "not mirrored"}: {m * 100:.1f} cm on average')
-        if offset == 0 and scale == 1 and not mirror:
-            print('  -> the laser matches the map at the true pose')
+        # Under half a centimetre is map-pixel noise (0.05 m cells): a 1.02 stretch won by
+        # 0.2 cm on a correct laser.
+        if med - m < 0.005:
+            print('  -> the laser matches the map at the true pose (any better fit is within noise)')
         else:
             print('  -> the scan fits better turned, stretched or mirrored: its angles are off')
         if self.p['spin_turns'] > 0:

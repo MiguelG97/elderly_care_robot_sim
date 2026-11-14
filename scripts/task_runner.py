@@ -44,7 +44,8 @@ Output in log_dir/<run_id>/ (run_id defaults to <home>_<task>_seed<seed>):
   events.csv  one row per job or return: times, result, failure reason, Nav2 error, path
               driven (ground truth), final error, how far Nav2's pose estimate (map ->
               base_footprint, i.e. AMCL plus odometry since its last update) was from the
-              true pose at the end, and where the robot and resident were (room, nearest
+              true pose at the end, how far wheel odometry alone has drifted from it since
+              the run started (a push from furniture shows here, not in AMCL), and where the robot and resident were (room, nearest
               doorway) when it started
   run.yaml    every parameter, ROS distro, start time and the checksums of the home's
               files: what is needed to repeat the run
@@ -74,7 +75,7 @@ from tf2_ros import Buffer, TransformListener
 FIELDS = ['run_id', 'home', 'social', 'seed', 'n', 'kind', 'target', 'goal_x', 'goal_y', 'goal_yaw',
           't_start', 't_end', 'duration_s', 'result', 'reason', 'nav2_status', 'nav2_error',
           'attempts', 'path_m', 'end_x', 'end_y', 'err_xy_m', 'err_yaw_rad',
-          'loc_err_m', 'loc_err_yaw_rad',
+          'loc_err_m', 'loc_err_yaw_rad', 'odom_drift_m', 'odom_drift_yaw_rad',
           'robot_x', 'robot_y', 'robot_room', 'resident_x', 'resident_y', 'resident_room',
           'resident_doorway', 'resident_dist_m']
 STATUS = {GoalStatus.STATUS_SUCCEEDED: 'succeeded', GoalStatus.STATUS_CANCELED: 'canceled',
@@ -88,6 +89,17 @@ def wrap(a):
 def pose2d(pose):
     q = pose.orientation
     return pose.position.x, pose.position.y, math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def compose(a, b):
+    """Pose b, given in frame a, expressed in a's parent frame."""
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], wrap(a[2] + b[2])
+
+
+def inverse(a):
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return -c * a[0] - s * a[1], s * a[0] - c * a[1], -a[2]
 
 
 def read_pgm(path):
@@ -194,8 +206,11 @@ class TaskRunner(Node):
         self.robot = None          # (x, y, yaw) from ground truth
         self.odometer = 0.0        # metres driven, ground truth
         self.resident = None       # (x, y)
+        self.odom = None           # (x, y, yaw) from wheel odometry, in its own odom frame
+        self.odom_origin = None    # true map -> odom at the start, so drift is measured from 0
         self.create_subscription(Odometry, '/ground_truth/odom', self.on_robot, 10)
         self.create_subscription(Odometry, '/people/odom', self.on_person, 10)
+        self.create_subscription(Odometry, '/mobile_base_controller/odom', self.on_odom, 10)
         # /amcl_pose is published only after update_min_d / update_min_a of motion, so it lags;
         # map -> base_footprint is what Nav2 itself uses.
         self.tf = Buffer()
@@ -210,6 +225,9 @@ class TaskRunner(Node):
         if self.robot:
             self.odometer += math.hypot(pose[0] - self.robot[0], pose[1] - self.robot[1])
         self.robot = pose
+
+    def on_odom(self, msg):
+        self.odom = pose2d(msg.pose.pose)
 
     def estimate(self):
         """(x, y, yaw) where Nav2 thinks the robot is, or None."""
@@ -344,6 +362,10 @@ class TaskRunner(Node):
             if est:
                 row.update(loc_err_m=round(math.hypot(est[0] - self.robot[0], est[1] - self.robot[1]), 3),
                            loc_err_yaw_rad=round(abs(wrap(est[2] - self.robot[2])), 4))
+            if self.odom and self.odom_origin:
+                odo = compose(self.odom_origin, self.odom)
+                row.update(odom_drift_m=round(math.hypot(odo[0] - self.robot[0], odo[1] - self.robot[1]), 3),
+                           odom_drift_yaw_rad=round(abs(wrap(odo[2] - self.robot[2])), 4))
         if outcome == 'succeeded':
             reason = check(row) if check else ''
             row.update(result='fail' if reason else 'success', reason=reason)
@@ -458,6 +480,13 @@ class TaskRunner(Node):
         while rclpy.ok() and (self.now() <= 0.0 or self.robot is None):
             rclpy.spin_once(self, timeout_sec=0.1)
         self.client.wait_for_server()
+        end = self.now() + 5.0
+        while rclpy.ok() and self.odom is None and self.now() < end:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        if self.odom:
+            self.odom_origin = compose(self.robot, inverse(self.odom))
+        else:
+            self.get_logger().warn('No /mobile_base_controller/odom: odom_drift will be empty')
         if self.p['task'] in ('resident', 'mixed'):
             end = self.now() + 10.0
             while rclpy.ok() and self.resident is None and self.now() < end:
