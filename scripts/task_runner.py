@@ -47,6 +47,8 @@ Output in log_dir/<run_id>/ (run_id defaults to <home>_<task>_seed<seed>):
               true pose at the end, how far wheel odometry alone has drifted from it since
               the run started (a push from furniture shows here, not in AMCL), and where the robot and resident were (room, nearest
               doorway) when it started
+  trace.csv   every trace_period sim seconds (0 = off): the true pose and Nav2's estimate, to
+              see where along a path the estimate goes wrong
   run.yaml    every parameter, ROS distro, start time and the checksums of the home's
               files: what is needed to repeat the run
 Each row is also published as JSON on /task_events, so a bag holds it. Record with:
@@ -178,7 +180,8 @@ class TaskRunner(Node):
             ('rest', 10.0), ('duration', 0.0), ('resident_wait', 20.0),
             ('approach_distance', 1.0), ('robot_radius', 0.275),
             ('dock_xy_tol', 0.25), ('dock_yaw_tol', 0.25),
-            ('social', False), ('patrol_skip', 'closet,cupboard,storage'), ('log_dir', os.path.expanduser('~/runs')), ('run_id', '')])
+            ('social', False), ('patrol_skip', 'closet,cupboard,storage'), ('log_dir', os.path.expanduser('~/runs')), ('run_id', ''),
+            ('trace_period', 0.5)])
         self.p = {q.name: q.value for q in p}
         if self.p['task'] not in ('patrol', 'room', 'resident', 'mixed'):
             raise SystemExit(f"task must be patrol, room, resident or mixed, not {self.p['task']!r}")
@@ -473,7 +476,23 @@ class TaskRunner(Node):
                   'home_files_sha256': self.home.checksums()}
         with open(os.path.join(out, 'run.yaml'), 'w') as f:
             yaml.safe_dump(record, f, sort_keys=False)
+        if self.p['trace_period'] > 0:
+            self.trace = open(os.path.join(out, 'trace.csv'), 'w', newline='')
+            self.trace_csv = csv.writer(self.trace)
+            self.trace_csv.writerow(['t', 'n', 'x', 'y', 'yaw', 'est_x', 'est_y', 'est_yaw', 'loc_err_m',
+                                     'loc_err_yaw_rad'])
+            self.create_timer(self.p['trace_period'], self.on_trace)
         self.get_logger().info(f'Logging to {out}')
+
+    def on_trace(self):
+        est = self.estimate()
+        if not (self.robot and est):
+            return
+        r = self.robot
+        self.trace_csv.writerow([round(self.now(), 2), self.n, *(round(v, 3) for v in r), *(round(v, 3) for v in est),
+                                 round(math.hypot(est[0] - r[0], est[1] - r[1]), 3),
+                                 round(abs(wrap(est[2] - r[2])), 4)])
+        self.trace.flush()
 
     def run(self):
         self.get_logger().info('Waiting for /clock, /ground_truth/odom and Nav2...')
