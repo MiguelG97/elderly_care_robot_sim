@@ -9,6 +9,7 @@ install(PROGRAMS
   scripts/send_goal.py
   scripts/gz_description.py
   scripts/task_runner.py
+  scripts/scan_check.py
   DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
