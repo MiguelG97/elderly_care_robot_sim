@@ -14,6 +14,12 @@ prints how far the laser points land from the map's walls. It then tries turning
 Then, with spin_turns > 0, it turns the robot on the spot (through key_vel, so do not run
 it while Nav2 is driving) and compares how far wheel odometry says it turned with how far it
 really turned. Run it with the robot on its dock: there is room to turn there.
+
+While turning it also checks timing, which a still robot cannot show. AMCL places each scan
+at the wheel-odometry pose for the scan's timestamp. If scan and odometry stamps disagree,
+scans taken while turning are placed turned, and AMCL corrects its heading the wrong way.
+So it places the turning scans at the pose for their stamp, from ground truth and from wheel
+odometry, and finds the turn that fits best, converted to a time offset.
 """
 import math
 import os
@@ -35,6 +41,29 @@ def yaw_of(q):
 
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
+
+
+def stamp(msg):
+    return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+
+def compose(a, b):
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], wrap(a[2] + b[2])
+
+
+def inverse(a):
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return -c * a[0] - s * a[1], s * a[0] - c * a[1], -a[2]
+
+
+def pose_at(hist, t):
+    """Pose interpolated at time t from a (stamp, pose) list, or None outside it."""
+    for (t0, a), (t1, b) in zip(hist, hist[1:]):
+        if t0 <= t <= t1:
+            k = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return (a[0] + k * (b[0] - a[0]), a[1] + k * (b[1] - a[1]), wrap(a[2] + k * wrap(b[2] - a[2])))
+    return None
 
 
 def read_map(folder):
@@ -85,6 +114,8 @@ class ScanCheck(Node):
         self.truth_turned = self.odom_turned = 0.0
         self.last_truth_yaw = self.last_odom_yaw = None
         self.scans = []
+        self.truth_hist, self.odom_hist = [], []   # (stamp s, (x, y, yaw))
+        self.spinning, self.spin_scans = False, []
         self.cmd = self.create_publisher(Twist, 'key_vel', 10)
         self.create_subscription(Odometry, '/ground_truth/odom', self.on_truth, 10)
         self.create_subscription(Odometry, '/mobile_base_controller/odom', self.on_odom, 10)
@@ -97,14 +128,19 @@ class ScanCheck(Node):
             self.truth_turned += wrap(yaw - self.last_truth_yaw)
         self.last_truth_yaw = yaw
         self.truth = (pose.position.x, pose.position.y, yaw)
+        self.truth_hist = self.truth_hist[-3000:] + [(stamp(msg), self.truth)]
 
     def on_odom(self, msg):
         yaw = yaw_of(msg.pose.pose.orientation)
         if self.last_odom_yaw is not None:
             self.odom_turned += wrap(yaw - self.last_odom_yaw)
         self.last_odom_yaw = yaw
+        p = msg.pose.pose.position
+        self.odom_hist = self.odom_hist[-3000:] + [(stamp(msg), (p.x, p.y, yaw))]
 
     def on_scan(self, msg):
+        if self.spinning:
+            self.spin_scans.append((msg, self.get_clock().now().nanoseconds * 1e-9))
         if self.truth and len(self.scans) < self.p['scans']:
             self.scans.append((msg, self.truth))
 
@@ -146,6 +182,7 @@ class ScanCheck(Node):
                 break
             except Exception:
                 rclpy.spin_once(self, timeout_sec=0.1)
+        self.mount_pose = mount
         n = len(scan.ranges)
         end = scan.angle_min + scan.angle_increment * (n - 1)
         print(f'\nLaser: frame {scan.header.frame_id}, {n} rays, angle_min {scan.angle_min:.4f}, '
@@ -193,16 +230,53 @@ class ScanCheck(Node):
         target = 2 * math.pi * self.p['spin_turns']
         print(f"\nTurning {self.p['spin_turns']:g} times on the spot at {self.p['spin_rate']} rad/s...")
         self.truth_turned = self.odom_turned = 0.0
+        # Robot still here, so the latest truth and odometry are the same instant.
+        origin = compose(self.truth_hist[-1][1], inverse(self.odom_hist[-1][1]))
         twist = Twist()
         twist.angular.z = self.p['spin_rate']
+        self.spinning = True
         while rclpy.ok() and abs(self.truth_turned) < target:
             self.cmd.publish(twist)
             self.wait(0.05)
+        self.spinning = False
         self.cmd.publish(Twist())
         self.wait(2.0)
+        self.timing(origin)
         diff = self.odom_turned - self.truth_turned
         print(f'True heading turned {self.truth_turned:+.3f} rad, wheel odometry says {self.odom_turned:+.3f} rad: '
               f'odometry off by {diff:+.3f} rad ({math.degrees(diff):+.1f} deg) over {self.p["spin_turns"]:g} turns')
+
+    def timing(self, origin):
+        scans = self.spin_scans[len(self.spin_scans) // 5:-len(self.spin_scans) // 5 or None]
+        scans = scans[::max(1, len(scans) // 8)]
+        if not scans:
+            print('No scans arrived while turning')
+            return
+        lag = sum(recv - stamp(m) for m, recv in scans) / len(scans)
+        print(f'\nWhile turning: scans arrive {lag * 1000:.0f} ms (sim) after their timestamp')
+        print(f'  latest truth stamp {self.truth_hist[-1][0]:.3f}, latest odometry stamp '
+              f'{self.odom_hist[-1][0]:.3f}, clock {self.get_clock().now().nanoseconds * 1e-9:.3f}')
+        rate = self.p['spin_rate']
+        for name, hist, wrap_pose in (('ground truth', self.truth_hist, lambda q: q),
+                                      ('wheel odometry (what AMCL uses)', self.odom_hist,
+                                       lambda q: compose(origin, q))):
+            def score(offset):
+                d = []
+                for m, _ in scans:
+                    q = pose_at(hist, stamp(m))
+                    if q is not None:
+                        d += self.fit(m, wrap_pose(q), self.mount_pose, offset=offset)
+                return sum(min(v, 0.5) for v in d) / len(d) if d else None
+            at0 = score(0.0)
+            if at0 is None:
+                print(f'  {name}: no poses around the scan stamps')
+                continue
+            best = min((score(k * 0.01), k * 0.01) for k in range(-30, 31))
+            print(f'  placed with {name} at the scan stamp: {at0 * 100:.1f} cm; best turned '
+                  f'{best[1]:+.2f} rad: {best[0] * 100:.1f} cm (= scan {best[1] / rate * 1000:+.0f} ms '
+                  f'from its stamp at {rate} rad/s)')
+        print('  -> both near 0 rad: timing is fine. Odometry off but truth near 0: odometry stamps '
+              'lag the scan, so AMCL is fed turned scans while the robot spins.')
 
 
 def main():
