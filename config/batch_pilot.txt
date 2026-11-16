@@ -1,0 +1,7 @@
+# RUN-6 pilot: Guest Flat, baseline and social, 3 seeds. Columns: home social seed
+guest_flat false 1
+guest_flat false 2
+guest_flat false 3
+guest_flat true  1
+guest_flat true  2
+guest_flat true  3
