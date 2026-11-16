@@ -3,7 +3,6 @@ build/
 install/
 log/
 
-# Python
 __pycache__/
 *.pyc
 
@@ -16,13 +15,16 @@ recordings/
 *.mkv
 *.webm
 
-# Blender backups
 *.blend1
 *.blend2
 
-# Editors and OS
 .vscode/
 .idea/
 *.swp
 .DS_Store
 Scans/
+
+# Homes generated from the scans by tools/scan_to_world.py: private, like Scans/
+homes/*/
+
+docs/

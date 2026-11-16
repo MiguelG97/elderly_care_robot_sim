@@ -5,14 +5,8 @@
       <inertial>
         <mass>1</mass>
       </inertial>
-      <collision name="collision">
-        <geometry>
-          <mesh>
-            <uri>model://aws_robomaker_residential_TV_01/meshes/aws_TV_01_collision.DAE</uri>
-            <scale>1 1 1</scale>
-          </mesh>
-        </geometry>
-      </collision>
+      <!-- No collision: the robot cannot touch this (on a wall, ceiling or other furniture),
+           and mesh collisions made DART run the house at 0.12x real time. -->
       <visual name="visual">
 	    <geometry>
           <mesh>

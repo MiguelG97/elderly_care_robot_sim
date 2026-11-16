@@ -91,7 +91,6 @@ def load_actors(world_file, wanted):
         loop = (script.findtext('loop', 'true').strip().lower() == 'true')
         delay = float(script.findtext('delay_start', '0') or 0)
         waypoints, offset = [], 0.0
-        # Multiple <trajectory> blocks play one after another.
         trajs = sorted(script.findall('trajectory'),
                        key=lambda tr: int(tr.get('id', '0')))
         for tr in trajs:

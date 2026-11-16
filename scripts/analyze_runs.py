@@ -4,7 +4,7 @@ analyze_runs: compare navigation runs recorded with ros2 bag.
 
   python3 analyze_runs.py recordings/baseline_run1 recordings/social_run1
 
-For each bag (needs /bcr_bot/odom and /people/odom) it reports, using
+For each bag (needs /ground_truth/odom and /people/odom) it reports, using
 simulation time from the message headers:
   - time moving   : from the robot starting to move until it stops for good
   - path length   : distance the robot actually drove
@@ -42,19 +42,19 @@ def read_bag(path):
         raise RuntimeError(f'Could not open bag {path}')
     types = {t.name: t.type for t in reader.get_all_topics_and_types()}
     robot, person = [], []
-    for name in ('/bcr_bot/odom', '/people/odom'):
+    for name in ('/ground_truth/odom', '/people/odom'):
         if name not in types:
             raise RuntimeError(f'{path} has no {name} topic (recorded topics: {sorted(types)})')
-    odom_type = get_message(types['/bcr_bot/odom'])
+    odom_type = get_message(types['/ground_truth/odom'])
     while reader.has_next():
         topic, data, _ = reader.read_next()
-        if topic not in ('/bcr_bot/odom', '/people/odom'):
+        if topic not in ('/ground_truth/odom', '/people/odom'):
             continue
         m = deserialize_message(data, odom_type)
         t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
         p = m.pose.pose.position
         v = math.hypot(m.twist.twist.linear.x, m.twist.twist.linear.y)
-        (robot if topic == '/bcr_bot/odom' else person).append((t, p.x, p.y, v))
+        (robot if topic == '/ground_truth/odom' else person).append((t, p.x, p.y, v))
     robot.sort()
     person.sort()
     return robot, person

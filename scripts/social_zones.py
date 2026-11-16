@@ -50,7 +50,6 @@ def social_grid(width, height, resolution, origin_x, origin_y, people,
     """
     grid = np.zeros((height, width), dtype=np.float32)
     for (px, py, heading, speed) in people:
-        # Only evaluate cells within `cutoff` metres of the person.
         i0 = max(int((px - cutoff - origin_x) / resolution), 0)
         i1 = min(int((px + cutoff - origin_x) / resolution) + 1, width)
         j0 = max(int((py - cutoff - origin_y) / resolution), 0)
@@ -61,8 +60,8 @@ def social_grid(width, height, resolution, origin_x, origin_y, people,
         ys = origin_y + (np.arange(j0, j1) + 0.5) * resolution
         gx, gy = np.meshgrid(xs - px, ys - py)
         c, s = math.cos(heading), math.sin(heading)
-        fwd = c * gx + s * gy          # distance in front of the person
-        side = -s * gx + c * gy        # distance to their left/right
+        fwd = c * gx + s * gy
+        side = -s * gx + c * gy
         sf = sigma_front + sigma_front_per_speed * max(speed, 0.0)
         sx = np.where(fwd >= 0.0, sf, sigma_rear)
         val = amplitude * np.exp(-(fwd ** 2) / (2 * sx ** 2) - (side ** 2) / (2 * sigma_side ** 2))
