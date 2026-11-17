@@ -67,6 +67,7 @@ trap 'cleanup; exit 130' INT TERM
 start() {   # start <log file> <command...>: own process group, so cleanup can stop all of it
   setsid "${@:2}" > "$1" 2>&1 &
   PGIDS+=($!)
+  disown $!
 }
 
 active() { ros2 lifecycle get "/$1" 2>/dev/null | grep -q '^active'; }
@@ -125,7 +126,9 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
   # Wheel odometry only publishes once the base controller is active, the last thing the sim
   # brings up. AMCL started earlier would miss sim time or the odom frame.
   echo "  waiting for the robot (up to ${SIM_WAIT}s)"
-  if ! timeout "$SIM_WAIT" ros2 topic echo --once /mobile_base_controller/odom > /dev/null 2>&1; then
+  # Without the type, echo exits at once if the topic does not exist yet instead of waiting.
+  if ! timeout "$SIM_WAIT" ros2 topic echo --once /mobile_base_controller/odom nav_msgs/msg/Odometry \
+      > /dev/null 2>&1; then
     fail "$RUN" no_sim "no /mobile_base_controller/odom after ${SIM_WAIT} s, see $OUT/sim.log"
     continue
   fi
