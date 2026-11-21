@@ -14,6 +14,8 @@
 #   RESULTS root folder [~/runs]
 #   RESIDENT [scripted]  scripted, or none for an empty home
 #   TOURS [0]  patrol: stop after this many rounds of the rooms (0 = run until RETURNS is met)
+#   ROOM  the room to go to, required with TASK=room
+#   BAG_EXTRA  more topics to record, space-separated, for diagnosing a failure
 #   SIM_WAIT [240] / NAV_WAIT [180]  seconds to wait for the robot / for Nav2 to come up
 #   SETTLE [10]  seconds to wait after each stage is up
 #
@@ -43,6 +45,8 @@ TASK=${TASK:-patrol}
 RETURNS=${RETURNS:-3}
 RESIDENT=${RESIDENT:-scripted}
 TOURS=${TOURS:-0}
+ROOM=${ROOM:-}
+BAG_EXTRA=${BAG_EXTRA:-}
 WALL_LIMIT=${WALL_LIMIT:-3600}
 BAG=${BAG:-1}
 RESULTS=${RESULTS:-$HOME/runs}
@@ -62,22 +66,28 @@ case "$RESIDENT" in scripted|none) ;; *) echo "RESIDENT must be scripted or none
 if [ "$TASK" = patrol ] && [ "$RETURNS" = 0 ] && [ "$TOURS" = 0 ]; then
   echo "A patrol needs RETURNS or TOURS above 0"; exit 1
 fi
+[ "$TASK" != room ] || [ -n "$ROOM" ] || { echo "TASK=room needs ROOM"; exit 1; }
 SHARE=$(ros2 pkg prefix elderly_care_robot_sim 2>/dev/null)/share/elderly_care_robot_sim
 [ -d "$SHARE" ] || { echo "elderly_care_robot_sim not found: source install/setup.bash"; exit 1; }
 
 write_record() {
   python3 - "$BATCH_DIR/batch.yaml" "$MATRIX" "$BATCH" "${PURPOSE:-}" "$TASK" "$RETURNS" "$BAG" \
-    "$COMMIT" "$DIRTY" "$RESIDENT" "$TOURS" <<'EOF'
+    "$COMMIT" "$DIRTY" "$RESIDENT" "$TOURS" "$ROOM" "$BAG_EXTRA" <<'EOF'
 import datetime, os, sys, yaml
-path, matrix, batch, purpose, task, returns, bag, commit, dirty, resident, tours = sys.argv[1:]
+path, matrix, batch, purpose, task, returns, bag, commit, dirty, resident, tours, room, extra = sys.argv[1:]
 lines = [' '.join(l.split()) for l in open(matrix) if l.strip() and not l.lstrip().startswith('#')]
 new = {'batch': batch, 'purpose': purpose,
        'created': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
        'git_commit': commit, 'git_dirty': dirty == 'true', 'resident': resident, 'task': task,
        'returns': int(returns), 'tours': int(tours), 'bag': bag == '1', 'matrix': lines}
+# Left out when unset, so batches recorded before these settings existed can still resume.
+if room:
+    new['room'] = room
+if extra:
+    new['bag_extra'] = extra.split()
 if os.path.isfile(path):
     old = yaml.safe_load(open(path))
-    changed = [k for k in new if k not in ('purpose', 'created') and old.get(k) != new[k]]
+    changed = [k for k in {*new, *old} if k not in ('purpose', 'created') and old.get(k) != new.get(k)]
     if changed:
         sys.exit(f"Batch '{batch}' was started with different {', '.join(changed)}. "
                  'Use a new batch name.')
@@ -154,7 +164,7 @@ try:
 except OSError:
     rows = []
 dock = [r for r in rows if r['kind'] == 'dock']
-patrol = [r for r in rows if r['kind'] == 'patrol' and r['result'] != 'interrupted']
+patrol = [r for r in rows if r['kind'] in ('patrol', 'room') and r['result'] != 'interrupted']
 ok = lambda rs: sum(r['result'] == 'success' for r in rs)
 print(ok(dock), len(dock), ok(patrol), len(patrol), sep='\t')
 EOF
@@ -206,11 +216,13 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
   fi
   sleep "$SETTLE"
   # No /clock: message headers carry sim time, and /clock was 750k of 780k messages per run.
+  # shellcheck disable=SC2206
+  TOPICS+=($BAG_EXTRA)
   [ "$BAG" = 1 ] && start "$OUT/logs/bag.log" ros2 bag record -o "$OUT/bag" "${TOPICS[@]}"
   echo "  running task_runner (limit ${WALL_LIMIT}s)"
 
   timeout "$WALL_LIMIT" ros2 run elderly_care_robot_sim task_runner.py --ros-args \
-    -p use_sim_time:=true -p home:="$HOME_ID" -p task:="$TASK" -p returns:="$RETURNS" -p tours:="$TOURS" \
+    -p use_sim_time:=true -p home:="$HOME_ID" -p task:="$TASK" -p returns:="$RETURNS" -p tours:="$TOURS" ${ROOM:+-p room:="$ROOM"} \
     -p seed:="$SEED" -p social:="$SOCIAL" -p run_id:="$RUN" -p log_dir:="$LOG_DIR" \
     > "$OUT/logs/task.log" 2>&1
   CODE=$?

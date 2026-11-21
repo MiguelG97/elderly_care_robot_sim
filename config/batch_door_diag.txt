@@ -1,0 +1,2 @@
+# Why the robot stops before the Bathroom door: one trip, empty home, baseline.
+guest_flat false 1
