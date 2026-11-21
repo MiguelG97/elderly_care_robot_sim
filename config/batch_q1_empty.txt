@@ -1,0 +1,5 @@
+# Q1 access test (A23): empty home, baseline. Columns: home social seed
+# RESIDENT=none RETURNS=0 TOURS=3
+guest_flat false 1
+guest_flat false 2
+guest_flat false 3

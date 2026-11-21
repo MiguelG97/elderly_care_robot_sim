@@ -226,7 +226,7 @@ def encounters(robot, resident):
                       'x': float(rx[k]), 'y': float(ry[k])})
         i = j
     return {'min_m': float(d.min()), 'near_s': float(dt[near].sum()), 'close_s': float(dt[d < CLOSE].sum()),
-            'encounters': found, 'path': np.column_stack([rx, ry])}
+            'encounters': found}
 
 
 def read_pgm(path):
@@ -256,10 +256,13 @@ def load(runs_dir, batch):
         p = meta['parameters']
         run = {'id': meta['run_id'], 'batch': batch, 'resident': resident, 'home': p['home'], 'seed': p['seed'],
                'mode': 'social' if str(p['social']).lower() == 'true' else 'baseline',
-               'events': list(csv.DictReader(open(ev))), 'dock': meta.get('dock'), 'enc': None}
+               'events': list(csv.DictReader(open(ev))), 'dock': meta.get('dock'), 'enc': None, 'path': None}
         bags = glob.glob(os.path.join(d, 'bag', '*.mcap'))
         if bags:
-            run['enc'] = encounters(*read_bag(bags[0]))
+            robot, resident = read_bag(bags[0])
+            run['enc'] = encounters(robot, resident)
+            if len(robot):
+                run['path'] = robot[:, 1:3]
         else:
             print(f'{run["id"]}: no bag, closeness metrics skipped', file=sys.stderr)
         runs.append(run)
@@ -338,6 +341,10 @@ def tables(runs):
     t['Q9 · Failures and where the resident was'] = (
         ['Home', 'Mode', 'Seed', 'Job', 'Target', 'Reason', 'Robot room (start)',
          'Resident room (start)', 'Resident doorway (start)', 'Resident distance (m, start)'], rows)
+    if all(r['resident'] == 'none' for r in runs):
+        del t['Q3, Q4 · Closeness to the resident'], t['Q9 · Failures and where the resident was']
+    if not t['Q8 · Return to dock'][1]:
+        del t['Q8 · Return to dock']
     return t
 
 
@@ -426,8 +433,8 @@ def figures(runs, homes_dir, out):
             ax.imshow(img, cmap='gray', extent=extent, vmin=0, vmax=255)
             rs = [r for r in runs if r['home'] == home and r['mode'] == mode]
             for r in rs:
-                if r['enc']:
-                    ax.plot(*r['enc']['path'].T, color=COLOURS[mode], lw=0.6, alpha=0.35)
+                if r['path'] is not None:
+                    ax.plot(*r['path'].T, color=COLOURS[mode], lw=0.6, alpha=0.35)
                 for e in r['events']:
                     if e['result'] == 'fail' and e['end_x']:
                         ax.plot(float(e['end_x']), float(e['end_y']), 'x', color='#B279A2', ms=9, mew=2)
@@ -564,9 +571,12 @@ def build_paper(runs_dir, homes_dir):
             continue
         section = PAPER_SECTIONS[q]
         for resident, rs in groups.items():
+            t = {k: v for k, v in tables(rs).items() if k.split(' · ')[0] == section}
+            if not t:
+                print(f'{q}, resident {resident}: these runs do not measure it')
+                continue
             out = os.path.join(qdir, resident)
             os.makedirs(out)
-            t = {k: v for k, v in tables(rs).items() if k.split(' · ')[0] == section}
             write_tables(t, out)
             figs = []
             with tempfile.TemporaryDirectory() as tmp:

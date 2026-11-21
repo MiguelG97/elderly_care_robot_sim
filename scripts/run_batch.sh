@@ -12,6 +12,8 @@
 # Settings (environment variables, defaults in brackets):
 #   TASK [patrol]  RETURNS [3]  WALL_LIMIT seconds per run [3600]  BAG 1 = record a rosbag [1]
 #   RESULTS root folder [~/runs]
+#   RESIDENT [scripted]  scripted, or none for an empty home
+#   TOURS [0]  patrol: stop after this many rounds of the rooms (0 = run until RETURNS is met)
 #   SIM_WAIT [240] / NAV_WAIT [180]  seconds to wait for the robot / for Nav2 to come up
 #   SETTLE [10]  seconds to wait after each stage is up
 #
@@ -39,6 +41,8 @@ MATRIX=${1:?usage: run_batch.sh <matrix file> [batch name]}
 BATCH=${2:-$(basename "${MATRIX%.*}")}
 TASK=${TASK:-patrol}
 RETURNS=${RETURNS:-3}
+RESIDENT=${RESIDENT:-scripted}
+TOURS=${TOURS:-0}
 WALL_LIMIT=${WALL_LIMIT:-3600}
 BAG=${BAG:-1}
 RESULTS=${RESULTS:-$HOME/runs}
@@ -53,19 +57,24 @@ COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
 DIRTY=$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo true || echo false)
 
 [ -f "$MATRIX" ] || { echo "No matrix file: $MATRIX"; exit 1; }
+case "$RESIDENT" in scripted|none) ;; *) echo "RESIDENT must be scripted or none"; exit 1 ;; esac
+# A patrol with neither limit would only stop at WALL_LIMIT and count as a failed run.
+if [ "$TASK" = patrol ] && [ "$RETURNS" = 0 ] && [ "$TOURS" = 0 ]; then
+  echo "A patrol needs RETURNS or TOURS above 0"; exit 1
+fi
 SHARE=$(ros2 pkg prefix elderly_care_robot_sim 2>/dev/null)/share/elderly_care_robot_sim
 [ -d "$SHARE" ] || { echo "elderly_care_robot_sim not found: source install/setup.bash"; exit 1; }
 
 write_record() {
   python3 - "$BATCH_DIR/batch.yaml" "$MATRIX" "$BATCH" "${PURPOSE:-}" "$TASK" "$RETURNS" "$BAG" \
-    "$COMMIT" "$DIRTY" <<'EOF'
+    "$COMMIT" "$DIRTY" "$RESIDENT" "$TOURS" <<'EOF'
 import datetime, os, sys, yaml
-path, matrix, batch, purpose, task, returns, bag, commit, dirty = sys.argv[1:]
+path, matrix, batch, purpose, task, returns, bag, commit, dirty, resident, tours = sys.argv[1:]
 lines = [' '.join(l.split()) for l in open(matrix) if l.strip() and not l.lstrip().startswith('#')]
 new = {'batch': batch, 'purpose': purpose,
        'created': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-       'git_commit': commit, 'git_dirty': dirty == 'true', 'resident': 'scripted', 'task': task,
-       'returns': int(returns), 'bag': bag == '1', 'matrix': lines}
+       'git_commit': commit, 'git_dirty': dirty == 'true', 'resident': resident, 'task': task,
+       'returns': int(returns), 'tours': int(tours), 'bag': bag == '1', 'matrix': lines}
 if os.path.isfile(path):
     old = yaml.safe_load(open(path))
     changed = [k for k in new if k not in ('purpose', 'created') and old.get(k) != new[k]]
@@ -122,6 +131,16 @@ fail() {   # fail <run> <code> <message>: log a run that never started its task
   printf '%s\t%s\t%s\t\t\t\t\n' "$1" "$2" $(( $(date +%s) - T0 )) >> "$SUMMARY"
 }
 
+empty_world() {   # empty_world <world> <output>: the same world without the resident
+  python3 - "$1" "$2" <<'EOF'
+import re, sys
+text = re.sub(r"\s*<actor name='resident'>.*?</actor>\n?", '\n', open(sys.argv[1]).read(), flags=re.S)
+if '<actor' in text:
+    sys.exit('world still has an actor')
+open(sys.argv[2], 'w').write(text)
+EOF
+}
+
 dock_pose() {
   python3 -c "import sys, yaml; d = yaml.safe_load(open(sys.argv[1]))['dock']; print(d['x'], d['y'], d['yaw'])" \
     "$SHARE/homes/$1/annotations.yaml"
@@ -157,8 +176,17 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
   echo "$(date +%H:%M:%S) start $RUN (dock $X $Y $YAW)"
   T0=$(date +%s)
 
+  SIM_WORLD=$WORLD PEOPLE=true TOPICS=(/ground_truth/odom /people/odom /task_events)
+  if [ "$RESIDENT" = none ]; then
+    SIM_WORLD=$OUT/empty.world PEOPLE=false TOPICS=(/ground_truth/odom /task_events)
+    if ! empty_world "$SHARE/homes/$HOME_ID/$HOME_ID.world" "$SIM_WORLD"; then
+      fail "$RUN" no_world "could not remove the resident from the world"
+      continue
+    fi
+  fi
+
   start "$OUT/logs/sim.log" ros2 launch elderly_care_robot_sim robot_in_house.launch.py \
-    world:="$WORLD" x:="$X" y:="$Y" yaw:="$YAW" headless:=True
+    world:="$SIM_WORLD" x:="$X" y:="$Y" yaw:="$YAW" headless:=True
   # Wheel odometry only publishes once the base controller is active, the last thing the sim
   # brings up. AMCL started earlier would miss sim time or the odom frame.
   echo "  waiting for the robot (up to ${SIM_WAIT}s)"
@@ -170,7 +198,7 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
   fi
   sleep "$SETTLE"
   start "$OUT/logs/nav2.log" ros2 launch elderly_care_robot_sim navigation.launch.py social:="$SOCIAL" \
-    world:="$WORLD" map:="$SHARE/homes/$HOME_ID/map.yaml" x:="$X" y:="$Y" yaw:="$YAW" rviz:=false
+    people:="$PEOPLE" world:="$WORLD" map:="$SHARE/homes/$HOME_ID/map.yaml" x:="$X" y:="$Y" yaw:="$YAW" rviz:=false
   echo "  waiting for Nav2 (up to ${NAV_WAIT}s)"
   if ! { wait_until "$NAV_WAIT" active amcl && wait_until "$NAV_WAIT" active bt_navigator; }; then
     fail "$RUN" no_nav2 "Nav2 not active after ${NAV_WAIT} s, see $OUT/logs/nav2.log"
@@ -178,12 +206,11 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
   fi
   sleep "$SETTLE"
   # No /clock: message headers carry sim time, and /clock was 750k of 780k messages per run.
-  [ "$BAG" = 1 ] && start "$OUT/logs/bag.log" ros2 bag record -o "$OUT/bag" \
-    /ground_truth/odom /people/odom /task_events
+  [ "$BAG" = 1 ] && start "$OUT/logs/bag.log" ros2 bag record -o "$OUT/bag" "${TOPICS[@]}"
   echo "  running task_runner (limit ${WALL_LIMIT}s)"
 
   timeout "$WALL_LIMIT" ros2 run elderly_care_robot_sim task_runner.py --ros-args \
-    -p use_sim_time:=true -p home:="$HOME_ID" -p task:="$TASK" -p returns:="$RETURNS" \
+    -p use_sim_time:=true -p home:="$HOME_ID" -p task:="$TASK" -p returns:="$RETURNS" -p tours:="$TOURS" \
     -p seed:="$SEED" -p social:="$SOCIAL" -p run_id:="$RUN" -p log_dir:="$LOG_DIR" \
     > "$OUT/logs/task.log" 2>&1
   CODE=$?

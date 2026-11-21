@@ -30,7 +30,8 @@ gap_min to gap_max seconds apart (drawn from seed). The robot drops its job, get
 dock_timeout seconds to reach the dock (if Nav2 gives up, the goal is sent again until the
 time is up), stays rest seconds, then carries on. The run ends
 after that many returns, or after duration sim seconds if set (0 = no limit). With
-returns = 0, room and resident do their job once and exit.
+returns = 0, room and resident do their job once and exit. A patrol stops after tours
+rounds of the rooms if tours > 0 (0 = no limit).
 
 social is only written to the log: pass the same value as navigation.launch.py's social:=
 (both default to false).
@@ -177,7 +178,7 @@ class TaskRunner(Node):
         p = self.declare_parameters('', [
             ('home', 'guest_flat'), ('task', 'patrol'), ('room', ''), ('returns', 0), ('seed', 0),
             ('gap_min', 60.0), ('gap_max', 240.0), ('dock_timeout', 180.0), ('task_timeout', 180.0),
-            ('rest', 10.0), ('duration', 0.0), ('resident_wait', 20.0),
+            ('rest', 10.0), ('duration', 0.0), ('resident_wait', 20.0), ('tours', 0),
             ('approach_distance', 1.0), ('robot_radius', 0.275),
             ('dock_xy_tol', 0.25), ('dock_yaw_tol', 0.25),
             ('social', False), ('patrol_skip', 'closet,cupboard,storage'), ('log_dir', os.path.expanduser('~/runs')), ('run_id', ''),
@@ -516,7 +517,7 @@ class TaskRunner(Node):
 
         self.n_returns, start = 0, self.now()
         self.schedule_call()
-        tour, done_once = [], False
+        tour, done_once, tours_started = [], False, 0
         while rclpy.ok():
             if self.p['duration'] and self.now() - start >= self.p['duration']:
                 break
@@ -531,7 +532,10 @@ class TaskRunner(Node):
                 break
             if task == 'patrol':
                 if not tour:
+                    if self.p['tours'] and tours_started >= self.p['tours']:
+                        break
                     tour = self.nearest_first(self.tour_goals)
+                    tours_started += 1
                 self.patrol_job(tour.pop(0))
             elif task == 'room':
                 if done_once:

@@ -10,6 +10,9 @@ Then, in a second terminal, one of:
 Both modes run people_publisher and social_zones, so RViz shows the same people
 markers and zones; only social:=true feeds the zones into Nav2's costmaps.
 
+people:=false leaves out people_publisher, for a world with no resident (it stops with an
+error when it finds no actor).
+
 A scanned home (tools/scan_to_world.py) passes its own world, map and spawn pose; the
 converter prints the command. Its world has the resident from tools/resident_routine.py.
 
@@ -95,7 +98,8 @@ def launch_setup(context):
         parameters=[sim_time, {
             'world_file': os.path.join(pkg, 'worlds', arg('world')),
             'actor_names': ['resident'],
-            'map_frame': 'map'}])
+            'map_frame': 'map'}],
+        condition=IfCondition(LaunchConfiguration('people')))
 
     zones = Node(
         package='elderly_care_robot_sim', executable='social_zones.py', name='social_zones',
@@ -119,6 +123,8 @@ def generate_launch_description():
         DeclareLaunchArgument('map', default_value=os.path.join(pkg, 'maps', 'small_house.yaml')),
         DeclareLaunchArgument('world', default_value='small_house.world'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('people', default_value='true',
+                              description='false = the world has no resident to track'),
         # AMCL's initial pose: the spawn pose in Gazebo world coordinates
         DeclareLaunchArgument('x', default_value='2.94'),
         DeclareLaunchArgument('y', default_value='4.40'),
