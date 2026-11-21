@@ -21,7 +21,7 @@
 # Per run, in LOG_DIR/<batch>_<home>_<base|social>_s<seed>/:
 #   events.csv, trace.csv, run.yaml  from task_runner
 #   sim.log, nav2.log, task.log      launch output
-#   bag/                             /ground_truth/odom /people/odom /task_events /clock
+#   bag/                             /ground_truth/odom /people/odom /task_events
 #   done                             written only when task_runner finished normally
 # One line per run in LOG_DIR/<batch>_summary.tsv. Runs with a done file are skipped, so a
 # stopped batch resumes where it left off when started again with the same batch name.
@@ -141,8 +141,9 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
     continue
   fi
   sleep "$SETTLE"
+  # No /clock: message headers carry sim time, and /clock was 750k of 780k messages per run.
   [ "$BAG" = 1 ] && start "$OUT/bag.log" ros2 bag record -o "$OUT/bag" \
-    /ground_truth/odom /people/odom /task_events /clock
+    /ground_truth/odom /people/odom /task_events
   echo "  running task_runner (limit ${WALL_LIMIT}s)"
 
   timeout "$WALL_LIMIT" ros2 run elderly_care_robot_sim task_runner.py --ros-args \
