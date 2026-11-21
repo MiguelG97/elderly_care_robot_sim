@@ -6,13 +6,25 @@
 """
 report: turn task_runner runs into tables, figures and one HTML page. Runs on the Mac, no ROS.
 
-  uv run tools/report.py ../runs --batch pilot
-  uv run tools/report.py ../runs --batch pilot --homes homes --out ../runs/report/pilot
+  uv run tools/report.py ../runs --batch pilot     one batch
+  uv run tools/report.py ../runs --paper           the batches chosen in paper/paper.yaml
 
-Reads every <runs>/<batch>_*/ folder that has events.csv and run.yaml (copied from the
-instance with rsync), plus its bag (bag/*.mcap: /ground_truth/odom and /people/odom) and
-the home's map.pgm/annotations.yaml from --homes. Writes to --out (default
-<runs>/report/<batch>):
+Reads <runs>/batches/<batch>/: batch.yaml and every runs/*/ folder that has events.csv and
+run.yaml (copied from the instance with rsync), plus its bag (bag/*.mcap: /ground_truth/odom
+and /people/odom) and the home's map.pgm/annotations.yaml from --homes.
+
+--batch writes to --out (default <runs>/batches/<batch>/report).
+--paper writes each question to <runs>/paper/<question>/<resident>/, without floor plans.
+paper.yaml lists the batches behind each question:
+  questions:
+    Q1: [q1_empty]
+    Q3_Q4: []
+    Q8: [main, main_more_seeds]
+    Q9: [q9_static]
+Batches with the same resident type are pooled; different types are kept apart. Two runs
+with the same home, mode, seed and resident type are refused, since they would count twice.
+
+Each output holds:
   tables.csv, tables.tex   dock returns (Q8), patrol by room (Q1), closeness to the resident
                            and encounter direction (Q3, Q4), failures with the resident's
                            position (Q9)
@@ -30,8 +42,10 @@ import glob
 import io
 import math
 import os
+import shutil
 import statistics
 import sys
+import tempfile
 from collections import Counter, defaultdict
 
 import matplotlib
@@ -57,8 +71,7 @@ DESIGN = """
 across) that starts every run on its charging dock.</li>
 <li><b>Job:</b> the robot patrols one goal in each room it can reach. At random moments
 (60–240 s apart) it is called back to the dock, wherever it is; 3 calls per run.</li>
-<li><b>Resident:</b> one person walking a scripted daily routine (bedroom, bathroom, day rooms) at
-an older adult's pace. They do not react to the robot yet.</li>
+<li><b>Resident:</b> {resident}</li>
 <li><b>Two navigation modes</b>, everything else identical:
   <ul><li><b>baseline</b>: standard navigation (Nav2). The resident is just an obstacle its laser
   sees.</li>
@@ -67,6 +80,15 @@ an older adult's pace. They do not react to the robot yet.</li>
 <li><b>Seeds:</b> each seed fixes the call times, so both modes face the same schedule.</li>
 <li><b>Measurement:</b> exact positions from the simulator, not the robot's own estimate.</li>
 </ul>"""
+
+RESIDENTS = {
+    'scripted': "one person walking a scripted daily routine (bedroom, bathroom, day rooms) at an "
+                "older adult's pace. They do not react to the robot yet.",
+    'static': 'one person standing still at a chosen spot.',
+    'none': 'none, the home is empty.',
+}
+# Report sections paper.yaml can name, as the id each table and figure title starts with.
+PAPER_SECTIONS = {'Q1': 'Q1', 'Q3_Q4': 'Q3, Q4', 'Q8': 'Q8', 'Q9': 'Q9'}
 
 # Question, why it matters, and what each column means; keyed by the table's id.
 QUESTIONS = {
@@ -138,8 +160,10 @@ def takeaway_q1(runs, homes_dir):
             text = (f"on the map, {len(a['rooms']) - len(blocked)} of {len(a['rooms'])} rooms have a spot "
                     f"the robot fits; {text}")
         parts.append(text)
-    return (f"{'; '.join(parts)}. The resident was walking around during these runs, so a room "
-            "missed here may be blocked by them and not by the layout. Q1 needs a run with an empty home.")
+    caveat = '' if all(r['resident'] == 'none' for r in runs) else (
+        ' A resident was present during these runs, so a room missed here may be blocked by them '
+        'and not by the layout. Q1 needs a run with an empty home.')
+    return f"{'; '.join(parts)}.{caveat}"
 
 
 def read_bag(path):
@@ -218,14 +242,19 @@ def read_pgm(path):
 
 
 def load(runs_dir, batch):
+    root = os.path.join(runs_dir, 'batches', batch)
+    record = os.path.join(root, 'batch.yaml')
+    if not os.path.isfile(record):
+        sys.exit(f'No batch record: {record}')
+    resident = yaml.safe_load(open(record))['resident']
     runs = []
-    for d in sorted(glob.glob(os.path.join(runs_dir, f'{batch}_*'))):
+    for d in sorted(glob.glob(os.path.join(root, 'runs', '*'))):
         ev, rec = os.path.join(d, 'events.csv'), os.path.join(d, 'run.yaml')
         if not (os.path.isfile(ev) and os.path.isfile(rec)):
             continue
         meta = yaml.safe_load(open(rec))
         p = meta['parameters']
-        run = {'id': meta['run_id'], 'home': p['home'], 'seed': p['seed'],
+        run = {'id': meta['run_id'], 'batch': batch, 'resident': resident, 'home': p['home'], 'seed': p['seed'],
                'mode': 'social' if str(p['social']).lower() == 'true' else 'baseline',
                'events': list(csv.DictReader(open(ev))), 'dock': meta.get('dock'), 'enc': None}
         bags = glob.glob(os.path.join(d, 'bag', '*.mcap'))
@@ -490,10 +519,10 @@ th{{color:var(--muted);font-weight:600}}
 dt{{font-weight:600;margin-top:6px}} dd{{margin:0 0 0 12px;color:var(--muted)}} details{{margin-top:10px}}
 </style></head><body>
 <h1>Run results · {batch}</h1>
-<p class="meta">{len(runs)} runs · homes: {homes} · seeds: {seeds} · baseline vs social navigation.
+<p class="meta">{len(runs)} runs · homes: {homes} · seeds: {seeds} · resident: {runs[0]['resident']} · baseline vs social navigation.
 Positions from simulation ground truth; distances centre to centre (robot radius 0.275 m).
 Resident and robot rooms are logged at the start of each job.</p>
-{DESIGN}
+{DESIGN.format(resident=RESIDENTS.get(runs[0]["resident"], runs[0]["resident"]))}
 {''.join(sections)}
 </body></html>"""
     path = os.path.join(out, 'report.html')
@@ -501,19 +530,73 @@ Resident and robot rooms are logged at the start of each job.</p>
     return path
 
 
+def build_paper(runs_dir, homes_dir):
+    base = os.path.join(runs_dir, 'paper')
+    spec = os.path.join(base, 'paper.yaml')
+    if not os.path.isfile(spec):
+        sys.exit(f'No {spec}')
+    questions = yaml.safe_load(open(spec)).get('questions') or {}
+    unknown = set(questions) - set(PAPER_SECTIONS)
+    if unknown:
+        sys.exit(f"Unknown in paper.yaml: {', '.join(sorted(unknown))}. Use {', '.join(PAPER_SECTIONS)}")
+    loaded, plan = {}, []
+    for q, batches in questions.items():
+        runs = []
+        for b in batches or []:
+            if b not in loaded:
+                loaded[b] = load(runs_dir, b)
+            if not loaded[b]:
+                sys.exit(f'{q}: batch {b} has no finished runs')
+            runs += loaded[b]
+        groups = defaultdict(list)
+        for r in runs:
+            groups[r['resident']].append(r)
+        for resident, rs in groups.items():
+            twice = [k for k, n in Counter((r['home'], r['mode'], r['seed']) for r in rs).items() if n > 1]
+            if twice:
+                sys.exit(f'{q}, resident {resident}: same run in two batches: {twice}')
+        plan.append((q, batches or [], groups))
+    for q, batches, groups in plan:
+        qdir = os.path.join(base, q)
+        shutil.rmtree(qdir, ignore_errors=True)
+        if not groups:
+            print(f'{q}: no batches chosen')
+            continue
+        section = PAPER_SECTIONS[q]
+        for resident, rs in groups.items():
+            out = os.path.join(qdir, resident)
+            os.makedirs(out)
+            t = {k: v for k, v in tables(rs).items() if k.split(' · ')[0] == section}
+            write_tables(t, out)
+            figs = []
+            with tempfile.TemporaryDirectory() as tmp:
+                for name, path in figures(rs, homes_dir, tmp):
+                    if name.split(' · ')[0] == section:
+                        kept = shutil.copy(path, out)
+                        figs.append((name, kept))
+            used = sorted({r['batch'] for r in rs})
+            print(write_html(t, figs, rs, out, f"{q} · {resident} ({', '.join(used)})", homes_dir))
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('runs', help='folder holding the run folders (copied from the instance)')
-    ap.add_argument('--batch', required=True, help='batch name given to run_batch.sh, e.g. pilot')
+    ap.add_argument('--batch', help='batch name given to run_batch.sh, e.g. pilot')
+    ap.add_argument('--paper', action='store_true', help='build the question outputs from paper/paper.yaml')
     ap.add_argument('--homes', default=os.path.join(here, '..', 'homes'), help='folder holding <home>/map.pgm')
     ap.add_argument('--out', help='output folder (default <runs>/report/<batch>)')
     a = ap.parse_args()
-    out = a.out or os.path.join(a.runs, 'report', a.batch)
+    if bool(a.batch) == a.paper:
+        ap.error('give either --batch <name> or --paper')
+    if a.paper:
+        build_paper(a.runs, a.homes)
+        return
+    out = a.out or os.path.join(a.runs, 'batches', a.batch, 'report')
     os.makedirs(out, exist_ok=True)
     runs = load(a.runs, a.batch)
     if not runs:
-        sys.exit(f'No {a.batch}_* runs with events.csv and run.yaml in {a.runs}')
+        sys.exit(f'No runs with events.csv and run.yaml in batch {a.batch}')
     t = tables(runs)
     write_tables(t, out)
     figs = figures(runs, a.homes, out)
