@@ -259,8 +259,8 @@ def load(runs_dir, batch):
                'events': list(csv.DictReader(open(ev))), 'dock': meta.get('dock'), 'enc': None, 'path': None}
         bags = glob.glob(os.path.join(d, 'bag', '*.mcap'))
         if bags:
-            robot, resident = read_bag(bags[0])
-            run['enc'] = encounters(robot, resident)
+            robot, person = read_bag(bags[0])
+            run['enc'] = encounters(robot, person)
             if len(robot):
                 run['path'] = robot[:, 1:3]
         else:
