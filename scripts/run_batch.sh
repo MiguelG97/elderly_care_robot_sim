@@ -16,6 +16,7 @@
 #   TOURS [0]  patrol: stop after this many rounds of the rooms (0 = run until RETURNS is met)
 #   ROOM  the room to go to, required with TASK=room
 #   BAG_EXTRA  more topics to record, space-separated, for diagnosing a failure
+#   NAV_PARAMS  a Nav2 parameter file to use instead of the package's (copied into the batch)
 #   SIM_WAIT [240] / NAV_WAIT [180]  seconds to wait for the robot / for Nav2 to come up
 #   SETTLE [10]  seconds to wait after each stage is up
 #
@@ -47,6 +48,7 @@ RESIDENT=${RESIDENT:-scripted}
 TOURS=${TOURS:-0}
 ROOM=${ROOM:-}
 BAG_EXTRA=${BAG_EXTRA:-}
+NAV_PARAMS=${NAV_PARAMS:-}
 WALL_LIMIT=${WALL_LIMIT:-3600}
 BAG=${BAG:-1}
 RESULTS=${RESULTS:-$HOME/runs}
@@ -67,14 +69,15 @@ if [ "$TASK" = patrol ] && [ "$RETURNS" = 0 ] && [ "$TOURS" = 0 ]; then
   echo "A patrol needs RETURNS or TOURS above 0"; exit 1
 fi
 [ "$TASK" != room ] || [ -n "$ROOM" ] || { echo "TASK=room needs ROOM"; exit 1; }
+[ -z "$NAV_PARAMS" ] || [ -f "$NAV_PARAMS" ] || { echo "No Nav2 parameter file: $NAV_PARAMS"; exit 1; }
 SHARE=$(ros2 pkg prefix elderly_care_robot_sim 2>/dev/null)/share/elderly_care_robot_sim
 [ -d "$SHARE" ] || { echo "elderly_care_robot_sim not found: source install/setup.bash"; exit 1; }
 
 write_record() {
   python3 - "$BATCH_DIR/batch.yaml" "$MATRIX" "$BATCH" "${PURPOSE:-}" "$TASK" "$RETURNS" "$BAG" \
-    "$COMMIT" "$DIRTY" "$RESIDENT" "$TOURS" "$ROOM" "$BAG_EXTRA" <<'EOF'
-import datetime, os, sys, yaml
-path, matrix, batch, purpose, task, returns, bag, commit, dirty, resident, tours, room, extra = sys.argv[1:]
+    "$COMMIT" "$DIRTY" "$RESIDENT" "$TOURS" "$ROOM" "$BAG_EXTRA" "$NAV_PARAMS" <<'EOF'
+import datetime, hashlib, os, sys, yaml
+path, matrix, batch, purpose, task, returns, bag, commit, dirty, resident, tours, room, extra, nav = sys.argv[1:]
 lines = [' '.join(l.split()) for l in open(matrix) if l.strip() and not l.lstrip().startswith('#')]
 new = {'batch': batch, 'purpose': purpose,
        'created': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -85,6 +88,8 @@ if room:
     new['room'] = room
 if extra:
     new['bag_extra'] = extra.split()
+if nav:
+    new['nav_params_sha256'] = hashlib.sha256(open(nav, 'rb').read()).hexdigest()[:16]
 if os.path.isfile(path):
     old = yaml.safe_load(open(path))
     changed = [k for k in {*new, *old} if k not in ('purpose', 'created') and old.get(k) != new.get(k)]
@@ -100,6 +105,7 @@ EOF
 }
 
 write_record || exit 1
+[ -z "$NAV_PARAMS" ] || cp "$NAV_PARAMS" "$BATCH_DIR/nav_params.yaml"
 mkdir -p "$LOG_DIR"
 [ -f "$SUMMARY" ] || printf 'run_id\texit\twall_s\tdocked\tdock_calls\tpatrol_ok\tpatrol_goals\n' > "$SUMMARY"
 
@@ -208,7 +214,7 @@ while read -r HOME_ID SOCIAL SEED _ <&3; do
   fi
   sleep "$SETTLE"
   start "$OUT/logs/nav2.log" ros2 launch elderly_care_robot_sim navigation.launch.py social:="$SOCIAL" \
-    people:="$PEOPLE" world:="$WORLD" map:="$SHARE/homes/$HOME_ID/map.yaml" x:="$X" y:="$Y" yaw:="$YAW" rviz:=false
+    ${NAV_PARAMS:+params:="$NAV_PARAMS"} people:="$PEOPLE" world:="$WORLD" map:="$SHARE/homes/$HOME_ID/map.yaml" x:="$X" y:="$Y" yaw:="$YAW" rviz:=false
   echo "  waiting for Nav2 (up to ${NAV_WAIT}s)"
   if ! { wait_until "$NAV_WAIT" active amcl && wait_until "$NAV_WAIT" active bt_navigator; }; then
     fail "$RUN" no_nav2 "Nav2 not active after ${NAV_WAIT} s, see $OUT/logs/nav2.log"

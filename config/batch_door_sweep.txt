@@ -1,0 +1,4 @@
+# Controller sweep (scripts/nav_sweep.sh): three repeats of one trip, empty home, baseline.
+guest_flat false 1
+guest_flat false 2
+guest_flat false 3

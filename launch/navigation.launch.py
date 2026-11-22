@@ -40,7 +40,7 @@ def launch_setup(context):
     rviz = LaunchConfiguration('rviz')
 
     social = arg('social').lower() in ('true', '1')
-    params = os.path.join(pkg, 'config', 'nav2_params_social.yaml' if social else 'nav2_params.yaml')
+    params = arg('params') or os.path.join(pkg, 'config', 'nav2_params_social.yaml' if social else 'nav2_params.yaml')
 
     sim_time = {'use_sim_time': True}
 
@@ -120,6 +120,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('social', default_value='false',
                               description='true = human-aware (zones in costmaps), false = baseline'),
+        DeclareLaunchArgument('params', default_value='',
+                              description='Nav2 parameter file to use instead of the one for social:='),
         DeclareLaunchArgument('map', default_value=os.path.join(pkg, 'maps', 'small_house.yaml')),
         DeclareLaunchArgument('world', default_value='small_house.world'),
         DeclareLaunchArgument('rviz', default_value='true'),
