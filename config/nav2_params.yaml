@@ -140,7 +140,7 @@ controller_server:
         cost_weight: 2.0
         offset_from_furthest: 4
         threshold_to_consider: 0.5
-        max_angle_to_furthest: 1.0
+        max_angle_to_furthest: 0.785 # at 1.0 the robot froze 0.97-1.04 rad off its path, 0.5 m before a 0.75 m door (L11)
         mode: 0
 
 local_costmap:
