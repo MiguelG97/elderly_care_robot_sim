@@ -10,7 +10,9 @@
 #   cost10       obstacle cost falls off faster, so a doorway's centre costs less
 #   shim         the robot turns on the spot to face its path before driving
 #   shim_cost10  both
-# Ends with a table: trips, arrivals, and time per arrival.
+#   shim_cost10_turn  both, and the shim also does the final turn onto the goal's heading
+# ONLY="<variants>" runs just those. Ends with a table: trips, arrivals, time per arrival and
+# median distance left to the goal.
 
 set -u
 
@@ -24,9 +26,12 @@ mkdir -p "$OUT"
 
 VARIANTS=(control cost10)
 if ros2 pkg prefix nav2_rotation_shim_controller >/dev/null 2>&1; then
-  VARIANTS+=(shim shim_cost10)
+  VARIANTS+=(shim shim_cost10 shim_cost10_turn)
 else
   echo "nav2_rotation_shim_controller is not installed: skipping the shim variants"
+fi
+if [ -n "${ONLY:-}" ]; then
+  read -r -a VARIANTS <<< "$ONLY"
 fi
 
 python3 - "$HERE/../config/nav2_params.yaml" "$OUT" <<'PY' || exit 1
@@ -46,8 +51,12 @@ def shim(p):
              rotate_to_heading_angular_vel=0.8, max_angular_accel=1.0, simulate_ahead_time=1.0,
              rotate_to_goal_heading=False)
 
+def turn(p):
+    p['controller_server']['ros__parameters']['FollowPath']['rotate_to_goal_heading'] = True
+
 for name, changes in {'control': [], 'cost10': [cost10], 'shim': [shim],
-                      'shim_cost10': [shim, cost10]}.items():
+                      'shim_cost10': [shim, cost10],
+                      'shim_cost10_turn': [shim, cost10, turn]}.items():
     p = copy.deepcopy(base)
     for change in changes:
         change(p)
@@ -66,7 +75,7 @@ done
 python3 - "$RESULTS/batches" "$NAME" "${VARIANTS[@]}" <<'PY'
 import csv, glob, os, statistics, sys
 root, name, variants = sys.argv[1], sys.argv[2], sys.argv[3:]
-print(f"\n{'variant':14}{'trips':>6}{'arrived':>9}{'median s':>10}{'slowest s':>11}")
+print(f"\n{'variant':18}{'trips':>6}{'arrived':>9}{'median s':>10}{'slowest s':>11}{'left m':>8}")
 for v in variants:
     rows = []
     for f in glob.glob(os.path.join(root, f'{name}_{v}', 'runs', '*', 'events.csv')):
@@ -74,5 +83,6 @@ for v in variants:
             rows += [r for r in csv.DictReader(open(f)) if r['kind'] == 'room']
     ok = [float(r['duration_s']) for r in rows if r['result'] == 'success']
     med, top = (f'{statistics.median(ok):.0f}', f'{max(ok):.0f}') if ok else ('-', '-')
-    print(f'{v:14}{len(rows):>6}{len(ok):>9}{med:>10}{top:>11}')
+    left = f"{statistics.median(float(r['err_xy_m']) for r in rows):.2f}" if rows else '-'
+    print(f'{v:18}{len(rows):>6}{len(ok):>9}{med:>10}{top:>11}{left:>8}')
 PY
