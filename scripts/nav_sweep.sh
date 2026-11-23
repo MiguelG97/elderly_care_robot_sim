@@ -6,11 +6,10 @@
 #
 # Each variant is a patched copy of config/nav2_params.yaml, run as its own batch
 # <name>_<variant> with no resident and no bag. Settings: ROOM [Bathroom], RESULTS [~/runs].
-#   control      the current settings
-#   cost10       obstacle cost falls off faster, so a doorway's centre costs less
-#   shim         the robot turns on the spot to face its path before driving
-#   shim_cost10  both
-#   shim_cost10_turn  both, and the shim also does the final turn onto the goal's heading
+#   control  the current settings
+#   cost4    obstacle cost falls off more slowly, so a doorway's centre costs more
+#   noturn   the rotation shim leaves the final turn onto the goal's heading to MPPI
+#   noshim   MPPI alone, without the rotation shim
 # ONLY="<variants>" runs just those. Ends with a table: trips, arrivals, time per arrival and
 # median distance left to the goal.
 
@@ -24,12 +23,7 @@ export ROOM=${ROOM:-Bathroom} RESIDENT=none TASK=room RETURNS=0 BAG=0
 OUT=$RESULTS/nav_variants/$NAME
 mkdir -p "$OUT"
 
-VARIANTS=(control cost10)
-if ros2 pkg prefix nav2_rotation_shim_controller >/dev/null 2>&1; then
-  VARIANTS+=(shim shim_cost10 shim_cost10_turn)
-else
-  echo "nav2_rotation_shim_controller is not installed: skipping the shim variants"
-fi
+VARIANTS=(control cost4 noturn noshim)
 if [ -n "${ONLY:-}" ]; then
   read -r -a VARIANTS <<< "$ONLY"
 fi
@@ -38,25 +32,22 @@ python3 - "$HERE/../config/nav2_params.yaml" "$OUT" <<'PY' || exit 1
 import copy, os, sys, yaml
 base = yaml.safe_load(open(sys.argv[1]))
 
-def cost10(p):
+def cost4(p):
     for name in ('local_costmap', 'global_costmap'):
-        p[name][name]['ros__parameters']['inflation_layer']['cost_scaling_factor'] = 10.0
+        p[name][name]['ros__parameters']['inflation_layer']['cost_scaling_factor'] = 4.0
 
-def shim(p):
+def noturn(p):
+    p['controller_server']['ros__parameters']['FollowPath']['rotate_to_goal_heading'] = False
+
+def noshim(p):
     c = p['controller_server']['ros__parameters']['FollowPath']
-    c['primary_controller'] = c['plugin']
-    c['plugin'] = 'nav2_rotation_shim_controller::RotationShimController'
-    # Turn rate and acceleration stay inside the PMB2 limits used by MPPI (wz_max, az_max).
-    c.update(angular_dist_threshold=0.5, forward_sampling_distance=0.5,
-             rotate_to_heading_angular_vel=0.8, max_angular_accel=1.0, simulate_ahead_time=1.0,
-             rotate_to_goal_heading=False)
+    c['plugin'] = c.pop('primary_controller')
+    for key in ('angular_dist_threshold', 'forward_sampling_distance', 'rotate_to_heading_angular_vel',
+                'max_angular_accel', 'simulate_ahead_time', 'rotate_to_goal_heading'):
+        del c[key]
 
-def turn(p):
-    p['controller_server']['ros__parameters']['FollowPath']['rotate_to_goal_heading'] = True
-
-for name, changes in {'control': [], 'cost10': [cost10], 'shim': [shim],
-                      'shim_cost10': [shim, cost10],
-                      'shim_cost10_turn': [shim, cost10, turn]}.items():
+for name, changes in {'control': [], 'cost4': [cost4], 'noturn': [noturn],
+                      'noshim': [noshim]}.items():
     p = copy.deepcopy(base)
     for change in changes:
         change(p)

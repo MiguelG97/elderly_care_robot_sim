@@ -51,7 +51,16 @@ controller_server:
       xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.15
     FollowPath:
-      plugin: "nav2_mppi_controller::MPPIController"
+      # MPPI alone took a minute to make the sharp turn into a narrow door and did not finish
+      # the last turn onto the goal's heading (A25).
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_mppi_controller::MPPIController"
+      angular_dist_threshold: 0.5
+      forward_sampling_distance: 0.5
+      rotate_to_heading_angular_vel: 0.8 # inside the PMB2 limits used by MPPI (wz_max, az_max)
+      max_angular_accel: 1.0
+      simulate_ahead_time: 1.0
+      rotate_to_goal_heading: true
       time_steps: 28
       model_dt: 0.1
       batch_size: 1000
@@ -159,7 +168,7 @@ local_costmap:
       plugins: ["static_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
+        cost_scaling_factor: 10.0 # at 4.0 a 0.8 m doorway cost too much to cross promptly (A25)
         inflation_radius: 0.55
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -224,7 +233,7 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
+        cost_scaling_factor: 10.0 # at 4.0 a 0.8 m doorway cost too much to cross promptly (A25)
         inflation_radius: 0.55
       always_send_full_costmap: true
       # Costmap-wide settings read by every StaticLayer in this costmap (they cannot be
