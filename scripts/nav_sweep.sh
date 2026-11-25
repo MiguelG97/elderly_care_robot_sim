@@ -9,6 +9,7 @@
 #   control  the current settings
 #   cost4    obstacle cost falls off more slowly, so a doorway's centre costs more
 #   noshim   MPPI alone, without the rotation shim
+#   xy10, xy05  Nav2 counts a goal reached within 0.10 / 0.05 m of it (instead of 0.15)
 # RETURNS=1 adds a dock call during the trip, to test docking too.
 # ONLY="<variants>" runs just those. Ends with a table per variant: room trips and arrivals,
 # dock calls and dockings, median docking time and distance left to the dock.
@@ -23,7 +24,7 @@ export ROOM=${ROOM:-Bathroom} RESIDENT=none TASK=room RETURNS=${RETURNS:-0} BAG=
 OUT=$RESULTS/nav_variants/$NAME
 mkdir -p "$OUT"
 
-VARIANTS=(control cost4 noshim)
+VARIANTS=(control cost4 noshim xy10 xy05)
 if [ -n "${ONLY:-}" ]; then
   read -r -a VARIANTS <<< "$ONLY"
 fi
@@ -43,7 +44,13 @@ def noshim(p):
                 'max_angular_accel', 'simulate_ahead_time'):
         del c[key]
 
-for name, changes in {'control': [], 'cost4': [cost4], 'noshim': [noshim]}.items():
+def xy(tol):
+    def change(p):
+        p['controller_server']['ros__parameters']['general_goal_checker']['xy_goal_tolerance'] = tol
+    return change
+
+for name, changes in {'control': [], 'cost4': [cost4], 'noshim': [noshim],
+                      'xy10': [xy(0.10)], 'xy05': [xy(0.05)]}.items():
     p = copy.deepcopy(base)
     for change in changes:
         change(p)
