@@ -36,6 +36,10 @@ rounds of the rooms if tours > 0 (0 = no limit).
 social is only written to the log: pass the same value as navigation.launch.py's social:=
 (both default to false).
 
+Nav2 only drives to a goal's position (its goal checker accepts any heading). Where the heading
+matters, the dock and facing the resident, the robot then turns on the spot with Nav2's spin
+behaviour, using Nav2's own heading estimate; that turn counts towards the job's time.
+
 Docked = Nav2 succeeded AND the true pose (/ground_truth/odom, not AMCL) is within
 dock_xy_tol and dock_yaw_tol of the dock pose (0.25 m, 0.25 rad: Nav2's goal checker stops
 within 0.15 of where AMCL thinks it is, plus room for AMCL's error). The final errors are
@@ -67,7 +71,8 @@ import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
-from nav2_msgs.action import NavigateToPose
+from builtin_interfaces.msg import Duration
+from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -221,6 +226,7 @@ class TaskRunner(Node):
         self.tf_listener = TransformListener(self.tf, self)
         self.events = self.create_publisher(String, '/task_events', 10)
         self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.spinner = ActionClient(self, Spin, 'spin')
         self.n = 0
         self.next_call = None
 
@@ -322,6 +328,30 @@ class TaskRunner(Node):
             self.get_logger().warn(f'Nav2 aborted ({error or "no error code"}); trying again')
             self.wait(1.0)
 
+    def turn_to(self, yaw, timeout):
+        """Turn on the spot to yaw, as Nav2 estimates the heading. Returns '' or a failure reason."""
+        est = self.estimate()
+        if est is None:
+            return 'turn_no_estimate'
+        delta = wrap(yaw - est[2])
+        if abs(delta) < 0.05:
+            return ''
+        goal = Spin.Goal()
+        goal.target_yaw = float(delta)
+        goal.time_allowance = Duration(sec=max(1, int(timeout)))
+        future = self.spinner.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future)
+        handle = future.result()
+        if not handle or not handle.accepted:
+            return 'turn_rejected'
+        result = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result, timeout_sec=timeout + 5.0)
+        if not result.done():
+            self.cancel(handle, result)
+            return 'turn_timeout'
+        status = STATUS.get(result.result().status, str(result.result().status))
+        return '' if status == 'succeeded' else f'turn_{status}'
+
     # Logging -----------------------------------------------------------------------------
 
     def where(self):
@@ -349,12 +379,17 @@ class TaskRunner(Node):
                                + f" after {row['duration_s']:.1f} s")
 
     def job(self, kind, target, x, y, yaw, interruptible=True, timeout=None, retarget=None, check=None,
-            retry=False):
+            retry=False, turn=False):
         row = {'kind': kind, 'target': target, 'goal_x': round(x, 3), 'goal_y': round(y, 3),
                'goal_yaw': round(yaw, 4), 't_start': round(self.now(), 2), **self.where()}
         path0 = self.odometer
-        outcome, status, error, attempts = self.navigate(x, y, yaw, timeout or self.p['task_timeout'],
-                                                         interruptible, retarget, retry)
+        timeout = timeout or self.p['task_timeout']
+        outcome, status, error, attempts = self.navigate(x, y, yaw, timeout, interruptible, retarget, retry)
+        turned = ''
+        if outcome == 'succeeded' and turn:
+            if retarget and self.resident:
+                yaw = math.atan2(self.resident[1] - self.robot[1], self.resident[0] - self.robot[0])
+            turned = self.turn_to(yaw, max(1.0, timeout - (self.now() - row['t_start'])))
         row.update(t_end=round(self.now(), 2), nav2_status=status, nav2_error=error, attempts=attempts,
                    path_m=round(self.odometer - path0, 3))
         row['duration_s'] = round(row['t_end'] - row['t_start'], 2)
@@ -371,7 +406,7 @@ class TaskRunner(Node):
                 row.update(odom_drift_m=round(math.hypot(odo[0] - self.robot[0], odo[1] - self.robot[1]), 3),
                            odom_drift_yaw_rad=round(abs(wrap(odo[2] - self.robot[2])), 4))
         if outcome == 'succeeded':
-            reason = check(row) if check else ''
+            reason = turned or (check(row) if check else '')
             row.update(result='fail' if reason else 'success', reason=reason)
         else:
             row.update(result='interrupted' if outcome == 'interrupted' else 'fail',
@@ -445,7 +480,7 @@ class TaskRunner(Node):
             if abs(wrap(math.atan2(ry - y, rx - x) - yaw)) > math.radians(30):
                 return 'not_facing_resident'
             return ''
-        return self.job('resident', 'resident', *spot, retarget=retarget, check=check)
+        return self.job('resident', 'resident', *spot, retarget=retarget, check=check, turn=True)
 
     def return_to_dock(self):
         d = self.home.dock
@@ -457,7 +492,7 @@ class TaskRunner(Node):
         self.n_returns += 1
         # A docking robot keeps trying until its time is up, as a real one would.
         row = self.job('dock', d.get('room', 'dock'), d['x'], d['y'], d['yaw'], interruptible=False,
-                       timeout=self.p['dock_timeout'], check=check, retry=True)
+                       timeout=self.p['dock_timeout'], check=check, retry=True, turn=True)
         self.wait(self.p['rest'])
         self.schedule_call()
         return row
