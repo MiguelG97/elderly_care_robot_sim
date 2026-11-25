@@ -46,9 +46,9 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # Tight enough that the true pose (AMCL is off by up to ~0.1 m) still lands within
-      # task_runner.py's 0.25 m docking check; at 0.25 the robot stopped 0.35 m off the dock.
-      xy_goal_tolerance: 0.15
+      # The robot stops at the edge of this, and AMCL is off by up to ~0.1 m, often the same
+      # way: at 0.15 dockings ended 0.23-0.26 m off against task_runner.py's 0.25 m (A27).
+      xy_goal_tolerance: 0.05
       # Any heading: Nav2 drives to the position and task_runner.py turns on the spot where the
       # heading matters. Ending on a heading made the rotation shim and MPPI undo each other's
       # turns at the dock until the time ran out (A26).

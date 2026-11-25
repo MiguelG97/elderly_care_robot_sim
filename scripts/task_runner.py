@@ -42,7 +42,7 @@ behaviour, using Nav2's own heading estimate; that turn counts towards the job's
 
 Docked = Nav2 succeeded AND the true pose (/ground_truth/odom, not AMCL) is within
 dock_xy_tol and dock_yaw_tol of the dock pose (0.25 m, 0.25 rad: Nav2's goal checker stops
-within 0.15 of where AMCL thinks it is, plus room for AMCL's error). The final errors are
+within 0.05 of where AMCL thinks it is, plus room for AMCL's error). The final errors are
 logged, so stricter thresholds can be applied in the analysis.
 
 Output in log_dir/<run_id>/ (run_id defaults to <home>_<task>_seed<seed>):
