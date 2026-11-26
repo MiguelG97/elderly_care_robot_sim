@@ -249,6 +249,14 @@ class TaskRunner(Node):
         return (t.translation.x, t.translation.y,
                 math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
 
+    def pose_ready(self, max_age=1.0):
+        """Whether Nav2 has a current pose for the robot (the map -> base_footprint chain)."""
+        try:
+            stamp = self.tf.lookup_transform('map', 'base_footprint', Time()).header.stamp
+        except Exception:
+            return False
+        return self.now() - (stamp.sec + stamp.nanosec * 1e-9) <= max_age
+
     def on_person(self, msg):
         if msg.child_frame_id in ('resident', ''):
             self.resident = (msg.pose.pose.position.x, msg.pose.pose.position.y)
@@ -294,9 +302,17 @@ class TaskRunner(Node):
         """Drive to (x, y, yaw). Returns (outcome, nav2_status, nav2_error, attempts), outcome
         one of succeeded, aborted, canceled, rejected, timeout, interrupted (a dock call came).
         retarget() may return a new (x, y, yaw) while driving; the goal is then replaced.
-        With retry, an aborted goal is sent again until the timeout runs out."""
+        With retry, an aborted goal is sent again until the timeout runs out. Whenever Nav2 has
+        lost the robot's pose, it waits for it and sends the same goal again: on a busy machine
+        the pose lapsed for 15-40 s and every goal sent meanwhile failed within 0.1 s."""
         start, attempts = self.now(), 0
         while True:
+            while not self.pose_ready():
+                if self.now() - start > timeout:
+                    return 'timeout', '', 'no robot pose', attempts
+                if interruptible and self.call_due():
+                    return 'interrupted', '', '', attempts
+                self.wait(0.5)
             attempts += 1
             handle = self.send(x, y, yaw)
             if handle is None:
@@ -323,6 +339,9 @@ class TaskRunner(Node):
             code = getattr(r.result, 'error_code', 0)
             msg = getattr(r.result, 'error_msg', '')
             error = f'{code} {msg}'.strip() if code else ''
+            if status == 'aborted' and not self.pose_ready() and self.now() - start + 1.0 < timeout:
+                self.get_logger().warn('Nav2 lost the robot pose; waiting for it, then trying again')
+                continue
             if not (retry and status == 'aborted' and self.now() - start + 1.0 < timeout):
                 return status, status, error, attempts
             self.get_logger().warn(f'Nav2 aborted ({error or "no error code"}); trying again')
