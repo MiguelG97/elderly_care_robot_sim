@@ -12,9 +12,11 @@ world file, replacing any earlier one. people_publisher.py reads the same actor,
 stops (purple) on the map.
 
 The routine is a compressed day, looped: bedroom -> bathroom -> each day room (kitchen,
-living room, other rooms; halls only if there is nothing else) -> bathroom -> first day
-room -> back to bed, with a pause at each stop. It walks the real doorways, keeps clear of walls and furniture, and
-never stops near the robot's spawn point or dock. Standard library only.
+living room, other rooms) -> bathroom -> first day room -> back to bed, with a pause at each
+stop. It walks the real doorways and keeps clear of walls and furniture. Stops are never in
+a hall or a day room under 4 m2, in a doorway, near the robot's dock, or where the person
+would cut the robot off from another room; a room with no such spot is only walked through.
+With no day room left, the day is spent at a second spot in the bedroom. Standard library only.
 """
 import argparse
 import heapq
@@ -24,7 +26,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scan_to_world import GRID, PREVIEW_SCALE, clearance, write_png  # noqa: E402
+from scan_to_world import GRID, PREVIEW_SCALE, ROBOT_RADIUS, clearance, write_png  # noqa: E402
 
 # Below the 0.8 m/s gait speed that marks frailty in older adults (Studenski et al. 2011,
 # JAMA), as expected of residents who need care; healthy people in their 70s walk at
@@ -32,13 +34,19 @@ from scan_to_world import GRID, PREVIEW_SCALE, clearance, write_png  # noqa: E40
 SPEED = 0.65
 TURN_RATE = 1.5        # rad/s when turning on the spot
 PERSON_RADIUS = 0.25   # half a person's shoulder width plus a margin, in metres
-KEEP_AWAY = 1.2        # no stop within this distance of the robot's spawn point or dock
+KEEP_AWAY = 1.2        # no stop within this distance of the robot's dock
+DOOR_KEEP = 0.6        # "in a doorway": nobody spends half a minute there
+# A stop must leave the robot a way past the person to every other room, with this much to
+# spare: AMCL is off by up to 0.1 m. Stops in the Guest Flat hall left none.
+PASS_MARGIN = 0.1
+MIN_DAY_AREA = 4.0     # m2; smaller rooms (halls, WCs, box rooms) are not where a day is spent
+SECOND_SPOT = 1.0      # a second bedroom stop is at least this far from the first
 ACTOR_Z = 1.0          # the walk.dae skeleton's origin is at hip height
 
 CATEGORIES = (('bedroom', ('bed',)), ('bathroom', ('bath', 'wc', 'toilet', 'shower')),
               ('kitchen', ('kitchen',)), ('living', ('living', 'lounge', 'sitting', 'dining')),
-              ('hall', ('hall', 'corridor', 'landing', 'entrance')),
-              ('skip', ('closet', 'cupboard', 'storage', 'utility', 'unlabelled')))
+              ('skip', ('hall', 'corridor', 'landing', 'entrance',
+                        'closet', 'cupboard', 'storage', 'utility', 'unlabelled')))
 
 ACTOR = """    <actor name='resident'>
       <skin>
@@ -169,21 +177,70 @@ def build(home, speed=SPEED, dwell=30.0):
     ok = [v == 254 and c >= PERSON_RADIUS for v, c in zip(mp, clear)]
     cost = [1.0 + 0.3 / max(c, GRID) for c in clear]
 
-    avoid = [(p['x'], p['y']) for p in (ann.get('spawn'), ann.get('dock')) if isinstance(p, dict) and p]
+    def cell(x, y):
+        return int((y - y0) / GRID) * nx + int((x - x0) / GRID)
+
+    def near(k, points, dist):
+        return any(math.hypot(centre(k)[0] - px, centre(k)[1] - py) < dist for px, py in points)
+
+    # Runs start on the dock
+    base = ann.get('dock') or ann.get('spawn')
+    avoid = [(base['x'], base['y'])] if isinstance(base, dict) and base else []
+    doors = [(d['x'], d['y']) for d in ann.get('doors', [])]
+
+    # Where the robot can drive from the dock, to check a standing person cuts no room off
+    robot_ok = [v == 254 and c >= ROBOT_RADIUS for v, c in zip(mp, clear)]
+    nbrs = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+
+    def reach(blocked=None):
+        seen = bytearray(nx * ny)
+        todo = [cell(*avoid[-1])] if avoid else []
+        for k in todo:
+            seen[k] = 1
+        while todo:
+            k = todo.pop()
+            x, y = k % nx, k // nx
+            for dx, dy in nbrs:
+                xx, yy = x + dx, y + dy
+                kk = yy * nx + xx
+                if 0 <= xx < nx and 0 <= yy < ny and not seen[kk] and robot_ok[kk] \
+                        and not (blocked and near(kk, [centre(blocked)], PERSON_RADIUS + ROBOT_RADIUS + PASS_MARGIN)):
+                    seen[kk] = 1
+                    todo.append(kk)
+        return seen
+    free = reach()
+    goals = [(g['room'], cell(g['x'], g['y'])) for g in ann.get('patrol', [])]
+    goals = [(room, k) for room, k in goals if free[k]]
+
+    def leaves_rooms_open(k, room):
+        seen = reach(k)
+        return all(seen[g] for r, g in goals if r != room)
+
+    def spot(room_id, room, away=()):
+        cells = sorted((k for k in range(nx * ny) if rooms[k] == room_id and ok[k]
+                        and not near(k, avoid, KEEP_AWAY) and not near(k, doors, DOOR_KEEP)
+                        and not near(k, away, SECOND_SPOT)), key=lambda k: -clear[k])
+        return next((k for k in cells if leaves_rooms_open(k, room)), None)
+
     stops = {}
     for r in ann['rooms']:
         cat = category(r['name'])
-        if cat == 'skip':
+        if cat == 'skip' or cat in ('kitchen', 'living', 'other') and (r.get('area_m2') or 0) < MIN_DAY_AREA:
             continue
-        cells = [k for k in range(nx * ny) if rooms[k] == int(r['id']) and ok[k]
-                 and all(math.hypot(centre(k)[0] - ax, centre(k)[1] - ay) >= KEEP_AWAY for ax, ay in avoid)]
-        if cells:
-            stops[r['name']] = (cat, max(cells, key=lambda k: clear[k]))
+        k = spot(int(r['id']), r['name'])
+        if k is not None:
+            stops[r['name']] = (cat, k)
 
     def first(cat):
         return [n for n, (c, _) in stops.items() if c == cat]
-    day = first('kitchen') + first('living') + first('other') or first('hall')
+    day = first('kitchen') + first('living') + first('other')
     bed, bath = first('bedroom')[:1], first('bathroom')[:1]
+    if not day and bed:
+        room = next(r for r in ann['rooms'] if r['name'] == bed[0])
+        k = spot(int(room['id']), bed[0], [centre(stops[bed[0]][1])])
+        if k is not None:
+            day = [bed[0] + ' (second spot)']
+            stops[day[0]] = ('bedroom', k)
     order = bed + bath + day + bath + day[:1] + bed
     order = [n for i, n in enumerate(order) if i == 0 or n != order[i - 1]]
     if order and order[0] == order[-1]:
